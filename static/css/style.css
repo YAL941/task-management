@@ -85,12 +85,16 @@ a { color: inherit; text-decoration: none; }
 .sidebar-footer { margin: 22px 11px 0; color: #a0a8b5; font-size: 10px; }
 .sidebar-footer span { float: right; }
 .main-content { min-width: 0; flex: 1; padding: 38px clamp(22px, 4vw, 58px) 60px; }
-.flash-stack { display: grid; gap: 8px; margin: 0 auto 22px; max-width: 1160px; }
-.flash-message { display: flex; align-items: center; gap: 10px; padding: 12px 15px; border: 1px solid; border-radius: 10px; font-size: 13px; transition: opacity .22s ease, transform .22s ease, max-height .22s ease; }
-.flash-message.is-dismissing { opacity: 0; transform: translateY(-5px); max-height: 0; overflow: hidden; padding-top: 0; padding-bottom: 0; }
-.flash-close { margin-left: auto; border: 0; color: currentColor; background: transparent; cursor: pointer; font-size: 19px; line-height: 1; opacity: .65; }
-.flash-close:hover { opacity: 1; }
-.flash-message span { font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.flash-region { width: min(1160px, calc(100% - 32px)); margin: 16px auto 0; }
+.flash-stack { display: grid; gap: 8px; }
+.flash-message { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 58px; padding: 10px 14px 10px 18px; border: 1px solid; border-left-width: 4px; border-radius: 10px; font-size: 13px; box-shadow: 0 6px 18px rgba(15, 23, 42, .07); transition: opacity .22s ease, transform .22s ease, max-height .22s ease, min-height .22s ease, padding .22s ease; }
+.flash-copy { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.flash-copy p { min-width: 0; margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.flash-label { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.flash-message.is-dismissing { opacity: 0; transform: translateY(-5px); min-height: 0; max-height: 0; overflow: hidden; padding-top: 0; padding-bottom: 0; }
+.flash-close { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 8px; color: currentColor; background: rgba(255, 255, 255, .65); cursor: pointer; font-size: 21px; line-height: 1; opacity: .75; }
+.flash-close:hover { opacity: 1; background: rgba(255, 255, 255, .95); }
+.flash-close:focus-visible { outline: 3px solid currentColor; outline-offset: 2px; }
 .flash-success { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
 .flash-error { color: #9f1239; border-color: #fecdd3; background: #fff1f2; }
 .field { width: 100%; padding: 10px 12px; border: 1px solid #d9dee7; border-radius: 9px; color: var(--ink); background: #fff; font-size: 13px; }

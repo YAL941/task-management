@@ -26,6 +26,15 @@ A Flask-based task management system with role-based access, notifications, team
 
 The project reads `DATABASE_URL` from `.env`. The default example uses Windows Authentication with the local `SQLEXPRESS` instance and the `Task Management System` database. Ensure SQL Server is running, the database exists, and ODBC Driver 18 for SQL Server is installed before starting Flask.
 
+## Deploy to Render with PostgreSQL
+
+1. Push the project to a GitHub repository, then create a Render Blueprint from that repository. Render reads `render.yaml` to create the web service and PostgreSQL database.
+2. When prompted, provide unique values for `ADMIN_PASSWORD`, `USER_PASSWORD`, and `MANAGER_PASSWORD`. Render generates `SECRET_KEY`; keep all secrets in Render environment settings, not in Git.
+3. Wait for the first deploy to finish, then open the service URL and sign in with the configured account passwords. The default usernames are `admin`, `user`, and `manager`.
+4. To run scheduled automation, create a separate Render Background Worker using `python worker.py` and copy the web service's environment variables to it. The worker is optional; without it, scheduled automation checks do not run.
+
+Render PostgreSQL is a separately billed service. Choose a database plan in Render that fits your budget and required data retention. Do not use SQLite for production on Render because its local filesystem is not persistent across service changes.
+
 ## Default login accounts
 
 - Admin: `admin` / `Admin@12345`

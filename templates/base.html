@@ -12,29 +12,6 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    
-    <!-- تنسيق مخصص لجعل الإشعارات تظهر في أعلى زاوية الشاشة بشكل عائم ومنعها من أخذ عرض الصفحة -->
-    <style>
-        .flash-stack {
-            position: fixed !important;
-            top: 20px !important;
-            right: 20px !important;
-            left: auto !important;
-            bottom: auto !important;
-            max-width: 380px !important;
-            width: 100% !important;
-            z-index: 99999 !important;
-            display: flex !important;
-            flex-direction: column !important;
-            gap: 10px !important;
-            pointer-events: none !important;
-        }
-        .flash-stack > * {
-            pointer-events: auto !important;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15) !important;
-            border-radius: 8px !important;
-        }
-    </style>
 
     {% block head %}{% endblock %}
 </head>
@@ -86,6 +63,24 @@
             </div>
         </div>
     </header>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="flash-region" aria-label="Page notifications">
+            <div class="flash-stack">
+                {% for category, message in messages %}
+                <div class="flash-message {{ 'flash-success' if category == 'success' else 'flash-error' }}" role="alert">
+                    <div class="flash-copy">
+                        <span class="flash-label">{{ 'Success' if category == 'success' else 'Notice' }}</span>
+                        <p>{{ message }}</p>
+                    </div>
+                    <button class="flash-close" type="button" aria-label="Dismiss notification" title="Dismiss notification">&times;</button>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+    {% endwith %}
 
     <div class="app-layout">
         <!-- طبقة التعتيم الخلفية عند فتح القائمة في الشاشات الصغيرة -->
@@ -212,7 +207,7 @@
                          style="display: none;">
                         <a href="{{ url_for('teams', view='all') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'teams' and (request.args.get('view') == 'all' or not request.args.get('view')) %}text-blue-600 bg-blue-50{% endif %}"><span>All Teams</span></a>
                         <a href="{{ url_for('teams', view='my') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'teams' and request.args.get('view') == 'my' %}text-blue-600 bg-blue-50{% endif %}"><span>My Teams</span></a>
-                        <a href="{{ url_for('teams') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'teams' %}text-blue-600 bg-blue-50{% endif %}"><span>Workspace</span></a>
+                        <a href="{{ url_for('open_team_workspace') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'team_detail' %}text-blue-600 bg-blue-50{% endif %}"><span>Workspace</span></a>
                     </div>
                 </div>
                 {% if session.get('role') == 'Admin' %}<a href="{{ url_for('automation') }}" class="nav-item {% if request.endpoint == 'automation' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></svg><span>Automation</span></a><a href="{{ url_for('audit_logs') }}" class="nav-item {% if request.endpoint == 'audit_logs' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Audit logs</span></a>{% endif %}
@@ -225,9 +220,6 @@
         </aside>
 
         <main class="main-content">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}<div class="flash-stack">{% for category, message in messages %}<div class="flash-message {{ 'flash-success' if category == 'success' else 'flash-error' }}" role="alert"><span>{{ 'Success' if category == 'success' else 'Notice' }}</span>{{ message }}<button class="flash-close" type="button" aria-label="Dismiss message">&times;</button></div>{% endfor %}</div>{% endif %}
-            {% endwith %}
             {% block content %}{% endblock %}
         </main>
     </div>

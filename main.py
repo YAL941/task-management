@@ -40,7 +40,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-this-secret")
 project_database = Path(__file__).resolve().parent / "TaskHQ.db"
 default_database = project_database if project_database.exists() else Path(__file__).resolve().parent / "instance" / "TaskHQ.db"
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", f"sqlite:///{default_database}")
+database_url = os.environ.get("DATABASE_URL")
+if database_url and database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url or f"sqlite:///{default_database}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 db = SQLAlchemy(app)
@@ -977,6 +980,31 @@ def teams():
     )
 
 
+@app.route("/team-workspace")
+@login_required
+def open_team_workspace():
+    user_id = session["user_id"]
+    role = session.get("role")
+    team = db.session.get(Team, session.get("team_workspace_id"))
+
+    if team and role not in {"Admin", "Manager"}:
+        membership = TeamMember.query.filter_by(team_id=team.id, user_id=user_id).first()
+        if team.leader_id != user_id and not membership:
+            team = None
+
+    if not team and role in {"Admin", "Manager"}:
+        team = Team.query.order_by(Team.name).first()
+    elif not team:
+        membership = TeamMember.query.filter_by(user_id=user_id).order_by(TeamMember.id.asc()).first()
+        team = db.session.get(Team, membership.team_id) if membership else Team.query.filter_by(leader_id=user_id).first()
+
+    if not team:
+        flash("No team workspace is available yet.", "info")
+        return redirect(url_for("teams"))
+
+    return redirect(url_for("team_detail", team_id=team.id))
+
+
 @app.route("/teams/<int:team_id>/meeting/start", methods=["POST"])
 @login_required
 def start_meeting(team_id):
@@ -1078,6 +1106,8 @@ def team_detail(team_id):
     if not is_team_manager and (session["user_id"] not in member_ids or "view_tasks" not in current_permissions):
         flash("You do not have access to this team.", "danger")
         return redirect(url_for("teams"))
+
+    session["team_workspace_id"] = team.id
 
     if request.method == "POST":
         if not valid_csrf():

@@ -27,10 +27,16 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('.flash-message').forEach((message) => {
         const dismiss = () => {
             message.classList.add('is-dismissing');
-            window.setTimeout(() => message.remove(), 220);
+            window.setTimeout(() => {
+                const stack = message.closest('.flash-stack');
+                message.remove();
+                if (stack && !stack.querySelector('.flash-message')) {
+                    stack.closest('.flash-region')?.remove();
+                }
+            }, 220);
         };
         message.querySelector('.flash-close')?.addEventListener('click', dismiss);
-        window.setTimeout(dismiss, 4200);
+        window.setTimeout(dismiss, 6000);
     });
 
     const notificationWrap = document.querySelector('.notification-wrap[data-notifications-feed]');
