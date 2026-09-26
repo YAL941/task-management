@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}AI Assistant - TaskHQ{% endblock %}
+
+
+{% block content %}
+<div class="page-head">
+    <div>
+        <p class="eyebrow">Workspace assistant</p>
+        <h1>AI Assistant</h1>
+        <p class="page-subtitle">Ask about the tasks you are allowed to see.</p>
+    </div>
+    <span class="table-count">{{ mode|default('mock')|upper }} MODE</span>
+</div>
+
+<section class="card-surface assistant-card">
+    <div class="assistant-intro">
+        <span class="shortcut-icon blue">✦</span>
+        <div>
+            <h2>Task intelligence</h2>
+            <p>Questions about your tasks, schedules, status, and priorities.</p>
+        </div>
+    </div>
+
+    <div class="assistant-suggestions" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;">
+        <button type="button" class="secondary-action" data-assistant-prompt="لخص مهامي">Summarize tasks</button>
+        <button type="button" class="secondary-action" data-assistant-prompt="ما المهام المتأخرة؟">Overdue tasks</button>
+        <button type="button" class="secondary-action" data-assistant-prompt="What is due this week?">Due this week</button>
+    </div>
+
+    <div data-assistant-conversation style="display:grid; gap:16px; margin:20px 0;">
+        {% for item in history|default([]) %}
+        <article data-assistant-turn style="padding-top:14px; border-top:1px solid #eef1f5;">
+            <p style="margin:0 0 8px; white-space:pre-wrap;"><strong>You</strong><br>{{ item.prompt }}</p>
+            <p style="margin:0; white-space:pre-wrap; line-height:1.7;">{{ item.response }}</p>
+            <small style="display:block; margin-top:7px; color:var(--muted);">{{ item.mode|upper }} · {{ item.created_at }}</small>
+        </article>
+        {% endfor %}
+        {% if answer %}
+        <article data-assistant-turn style="padding-top:14px; border-top:1px solid #eef1f5;">
+            <p style="margin:0 0 8px; white-space:pre-wrap;"><strong>You</strong><br>{{ prompt }}</p>
+            <p style="margin:0; white-space:pre-wrap; line-height:1.7;">{{ answer }}</p>
+            <small style="display:block; margin-top:7px; color:var(--muted);">{{ mode|upper }}</small>
+        </article>
+        {% endif %}
+    </div>
+    
+    <form method="POST" class="assistant-form" data-assistant-form data-ask-url="{{ url_for('api_ai_ask') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <textarea class="field" name="prompt" rows="3" required maxlength="2000" placeholder="Ask a question about your tasks..."></textarea>
+        
+        <div class="form-actions">
+            <button type="submit" class="primary-action">
+                <span data-assistant-submit-label>Ask assistant</span>
+                <span aria-hidden="true">→</span>
+            </button>
+        </div>
+        <p data-assistant-status role="status" aria-live="polite" style="min-height:18px; margin:0; color:var(--muted); font-size:11px;"></p>
+    </form>
+</section>
+{% endblock %}

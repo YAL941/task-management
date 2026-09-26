@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}Reports - TaskHQ{% endblock %}
+
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Performance centre</p><h1>Reports</h1><p class="page-subtitle">A focused view of task health, ownership, and delivery.</p></div><a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>→</span></a></div>
+
+{% set completed = reports|selectattr('status', 'equalto', 'Completed')|list|length %}
+{% set high_priority = reports|selectattr('priority', 'equalto', 'High')|list|length %}
+<div class="metric-grid report-metrics">
+    <div class="metric-card metric-blue"><div><span class="metric-label">Tracked tasks</span><strong>{{ reports|length }}</strong><small>Visible in this report</small></div><span class="metric-icon">⌁</span></div>
+    <div class="metric-card metric-green"><div><span class="metric-label">Completed</span><strong>{{ completed }}</strong><small>Tasks delivered</small></div><span class="metric-icon">✓</span></div>
+    <div class="metric-card metric-slate"><div><span class="metric-label">High priority</span><strong>{{ high_priority }}</strong><small>Needs attention</small></div><span class="metric-icon">!</span></div>
+</div>
+
+<section class="card-surface report-table-wrap">
+    <div class="report-table-head"><div><span class="panel-kicker">Detailed view</span><h2>Task performance</h2></div><span class="table-count">{{ reports|length }} records</span></div>
+    <div class="overflow-x-auto"><table class="modern-table"><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Priority</th><th>Owner</th><th>Hours</th><th>Due date</th></tr></thead><tbody>
+    {% for report in reports %}<tr><td class="muted-cell">#{{ report.id }}</td><td class="strong-cell">{{ report.title }}</td><td><span class="status-pill {% if report.status == 'Completed' %}status-complete{% elif report.status == 'In Progress' %}status-progress{% else %}status-pending{% endif %}">{{ report.status }}</span></td><td><span class="priority-dot priority-{{ report.priority|lower }}">{{ report.priority }}</span></td><td>{{ report.username or 'Unassigned' }}</td><td>{{ report.actual_hours or 0 }} hrs</td><td class="muted-cell">{{ report.due_date or 'No deadline' }}</td></tr>
+    {% else %}<tr><td colspan="7"><div class="empty-state"><span class="empty-state-icon">⌁</span><strong>No report data yet</strong><p>Create a task to start seeing performance data here.</p><a href="{{ url_for('tasks') }}" class="primary-action">Open tasks</a></div></td></tr>{% endfor %}
+    </tbody></table></div>
+</section>
+{% endblock %}

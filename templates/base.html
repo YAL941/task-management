@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+        <title>{% block title %}TaskHQ{% endblock %}</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    
+    <!-- تنسيق مخصص لجعل الإشعارات تظهر في أعلى زاوية الشاشة بشكل عائم ومنعها من أخذ عرض الصفحة -->
+    <style>
+        .flash-stack {
+            position: fixed !important;
+            top: 20px !important;
+            right: 20px !important;
+            left: auto !important;
+            bottom: auto !important;
+            max-width: 380px !important;
+            width: 100% !important;
+            z-index: 99999 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 10px !important;
+            pointer-events: none !important;
+        }
+        .flash-stack > * {
+            pointer-events: auto !important;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15) !important;
+            border-radius: 8px !important;
+        }
+    </style>
+
+    {% block head %}{% endblock %}
+</head>
+<body class="app-shell" x-data="{ mobileNav: false }">
+    <div class="app-noise" aria-hidden="true"></div>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <button class="mobile-menu-button" type="button" aria-label="Open navigation" @click="mobileNav = !mobileNav">
+                <span></span><span></span><span></span>
+            </button>
+            <a href="{{ url_for('index') }}" class="brand">
+                <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4.75A2.75 2.75 0 0 1 8.75 2h8.5A2.75 2.75 0 0 1 20 4.75v14.5A2.75 2.75 0 0 1 17.25 22h-8.5A2.75 2.75 0 0 1 6 19.25V4.75Z"/><path d="m9.5 13 2 2 3.5-4"/></svg></span>
+                <span><strong>TaskHQ</strong></span>
+            </a>
+            <div class="topbar-actions">
+                <div class="notification-wrap" data-notifications-feed="{{ url_for('notifications_feed') }}" x-data="{ open: false, unread: {{ unread_count|default(0) }}, async markAsRead() { if (!this.unread) return; try { const response = await fetch('{{ url_for('mark_notifications_read') }}', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'csrf_token={{ csrf_token }}' }); if (response.ok) this.unread = 0; } catch (error) { console.error('Could not mark notifications as read', error); } } }">
+                    <button class="icon-button" type="button" @click="open = !open; if (open) markAsRead()" aria-label="Notifications" title="Notifications">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+                        <span class="notification-dot" data-notification-count x-show="unread > 0" x-text="unread" x-cloak></span>
+                    </button>
+                    <div class="notification-panel" x-show="open" x-cloak @click.away="open = false">
+                        <div class="panel-heading"><span>Notifications</span><span class="panel-count" x-text="unread > 0 ? unread + ' new' : 'All read'"></span></div>
+                        <div data-notification-items>
+                        {% for notification in notifications|default([]) %}
+                            <a href="{{ url_for('open_notification', notification_id=notification.id) }}" class="notification-item" data-notification-id="{{ notification.id }}">
+                                <span class="notification-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+                                </span>
+                                <span><strong>{{ notification.message.split(':', 2)[2].strip() if notification.message.startswith('team:') or notification.message.startswith('team_task:') else notification.message }}</strong><small>{{ notification.created_at }}</small></span>
+                                <svg class="notification-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                            </a>
+                        {% else %}<div class="empty-mini" data-notification-empty>You are all caught up.</div>{% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div class="profile-wrap" x-data="{ open: false }">
+                    <button class="profile-button" type="button" @click="open = !open" aria-label="Open profile menu">
+                        <span class="avatar">{{ (current_user.username if current_user else session.get('username', 'U'))[0]|upper }}</span>
+                        <span class="profile-meta"><strong>{{ current_user.username if current_user else session.get('username', 'User') }}</strong><small>{{ session.get('role', 'User') }}</small></span>
+                        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                    </button>
+                    <div class="profile-panel" x-show="open" x-cloak @click.away="open = false">
+                        <div class="profile-panel-head"><span class="avatar avatar-lg">{{ (current_user.username if current_user else session.get('username', 'U'))[0]|upper }}</span><div><strong>{{ current_user.username if current_user else session.get('username', 'User') }}</strong><small>{{ session.get('role', 'User') }} account</small></div></div>
+                        {% if session.get('role') == 'Admin' %}<a href="{{ url_for('users') }}">Manage users</a>{% endif %}
+                        <a href="{{ url_for('settings') }}">Notification settings</a>
+                        <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="logout-link">Sign out</button></form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="app-layout">
+        <!-- طبقة التعتيم الخلفية عند فتح القائمة في الشاشات الصغيرة -->
+        <div class="sidebar-backdrop" x-show="mobileNav" x-cloak @click="mobileNav = false" style="display: none;"></div>
+        
+        <!-- القائمة الجانبية -->
+        <aside class="sidebar" :class="mobileNav ? 'sidebar-open' : ''" style="background-color: #ffffff !important; opacity: 1 !important; box-shadow: 4px 0 25px rgba(0, 0, 0, 0.15) !important;">
+            <div class="sidebar-label">Workspace</div>
+            <nav class="sidebar-nav" aria-label="Main navigation">
+                
+                <!-- زر Overview -->
+                <a href="{{ url_for('index') }}" class="nav-item {% if request.endpoint == 'index' %}active{% endif %}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                    <span>Overview</span>
+                </a>
+
+                <!-- حاوية Tasks والقائمة المنسدلة تحتها مباشرة -->
+                <div x-data="{ tasksOpen: false }" @click.outside="tasksOpen = false" class="space-y-1">
+                    <div @click.stop="tasksOpen = !tasksOpen" 
+                         class="nav-item flex items-center justify-between cursor-pointer {% if request.endpoint in ['tasks', 'add_task', 'update_status'] %}active{% endif %}">
+                        <div class="flex items-center space-x-2">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="w-5 h-5"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                            <span>Tasks</span>
+                        </div>
+                        <!-- السهم الذي ينعكس عند الفتح -->
+                        <svg class="w-4 h-4 transition-transform duration-200" :class="tasksOpen ? 'rotate-180' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7"/></svg>
+                    </div>
+
+                    <!-- القائمة المنسدلة مع روابط صحيحة تمرر الباراميترات (view) -->
+                    <div x-show="tasksOpen" 
+                         x-transition:enter="transition-all ease-out duration-200"
+                         x-transition:enter-start="opacity-0 max-h-0"
+                         x-transition:enter-end="opacity-100 max-h-48"
+                         x-transition:leave="transition-all ease-in duration-150"
+                         x-transition:leave-start="opacity-100 max-h-48"
+                         x-transition:leave-end="opacity-0 max-h-0"
+                         class="overflow-hidden pl-4 space-y-1 my-1 border-l-2 border-blue-100 ml-4"
+                         style="display: none;">
+                        
+                        <a href="{{ url_for('tasks', view='all') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.args.get('view') == 'all' or not request.args.get('view') %}text-blue-600 bg-blue-50{% endif %}">
+                            <span>All Tasks</span>
+                        </a>
+                        <a href="{{ url_for('tasks', view='sent') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.args.get('view') == 'sent' %}text-blue-600 bg-blue-50{% endif %}">
+                            <span>Sent Tasks</span>
+                        </a>
+                        <a href="{{ url_for('tasks', view='received') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.args.get('view') == 'received' %}text-blue-600 bg-blue-50{% endif %}">
+                            <span>Received Tasks</span>
+                        </a>
+                        <a href="{{ url_for('tasks', view='urgent') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.args.get('view') == 'urgent' %}text-blue-600 bg-blue-50{% endif %}">
+                            <span>Priority & Urgent</span>
+                        </a>
+                    </div>
+                </div>
+
+                <!-- باقي القوائم -->
+                {% if session.get('role') == 'Admin' %}
+                <div x-data="{ usersOpen: {{ 'true' if request.endpoint == 'users' else 'false' }} }" @click.outside="usersOpen = false" class="space-y-1">
+                    <div @click.stop="usersOpen = !usersOpen" class="nav-item flex items-center justify-between cursor-pointer {% if request.endpoint == 'users' %}active{% endif %}">
+                        <div class="flex items-center space-x-2">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                            <span>Users</span>
+                        </div>
+                        <span class="nav-badge">Admin</span>
+                        <svg class="w-4 h-4 transition-transform duration-200" :class="usersOpen ? 'rotate-180' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7"/></svg>
+                    </div>
+
+                    <div x-show="usersOpen"
+                         x-transition:enter="transition-all ease-out duration-200"
+                         x-transition:enter-start="opacity-0 max-h-0"
+                         x-transition:enter-end="opacity-100 max-h-48"
+                         x-transition:leave="transition-all ease-in duration-150"
+                         x-transition:leave-start="opacity-100 max-h-48"
+                         x-transition:leave-end="opacity-0 max-h-0"
+                         class="overflow-hidden pl-4 space-y-1 my-1 border-l-2 border-blue-100 ml-4"
+                         style="display: none;">
+                        <a href="{{ url_for('users', view='all') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'users' and (request.args.get('view') == 'all' or not request.args.get('view')) %}text-blue-600 bg-blue-50{% endif %}"><span>All Users</span></a>
+                        <a href="{{ url_for('users', view='managers') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'users' and request.args.get('view') == 'managers' %}text-blue-600 bg-blue-50{% endif %}"><span>Managers</span></a>
+                        <a href="{{ url_for('users', view='admins') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'users' and request.args.get('view') == 'admins' %}text-blue-600 bg-blue-50{% endif %}"><span>Admins</span></a>
+                    </div>
+                </div>
+                {% endif %}
+
+                <div x-data="{ reportsOpen: {{ 'true' if request.endpoint in ['reports', 'analytics'] else 'false' }} }" @click.outside="reportsOpen = false" class="space-y-1">
+                    <div @click.stop="reportsOpen = !reportsOpen" class="nav-item flex items-center justify-between cursor-pointer {% if request.endpoint in ['reports', 'analytics'] %}active{% endif %}">
+                        <div class="flex items-center space-x-2">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h17"/><path d="m7 15 3-4 3 2 5-7"/></svg>
+                            <span>Reports</span>
+                        </div>
+                        <svg class="w-4 h-4 transition-transform duration-200" :class="reportsOpen ? 'rotate-180' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7"/></svg>
+                    </div>
+
+                    <div x-show="reportsOpen"
+                         x-transition:enter="transition-all ease-out duration-200"
+                         x-transition:enter-start="opacity-0 max-h-0"
+                         x-transition:enter-end="opacity-100 max-h-48"
+                         x-transition:leave="transition-all ease-in duration-150"
+                         x-transition:leave-start="opacity-100 max-h-48"
+                         x-transition:leave-end="opacity-0 max-h-0"
+                         class="overflow-hidden pl-4 space-y-1 my-1 border-l-2 border-blue-100 ml-4"
+                         style="display: none;">
+                        <a href="{{ url_for('reports') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'reports' %}text-blue-600 bg-blue-50{% endif %}"><span>Summary</span></a>
+                        <a href="{{ url_for('analytics') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'analytics' %}text-blue-600 bg-blue-50{% endif %}"><span>Analytics</span></a>
+                        <a href="{{ url_for('reports') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"><span>Delivery</span></a>
+                    </div>
+                </div>
+                <a href="{{ url_for('assistant') }}" class="nav-item {% if request.endpoint == 'assistant' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a7 7 0 0 0-4 12.74V19l4-1 4 1v-3.26A7 7 0 0 0 12 3Z"/><path d="M9.5 9.5h.01M14.5 9.5h.01M9 13c1.8 1.5 4.2 1.5 6 0"/></svg><span>AI Assistant</span></a>
+                <div x-data="{ teamsOpen: {{ 'true' if request.endpoint in ['teams', 'team_detail'] else 'false' }} }" @click.outside="teamsOpen = false" class="space-y-1">
+                    <div @click.stop="teamsOpen = !teamsOpen" class="nav-item flex items-center justify-between cursor-pointer {% if request.endpoint == 'teams' or request.endpoint == 'team_detail' %}active{% endif %}">
+                        <div class="flex items-center space-x-2">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                            <span>Teams</span>
+                        </div>
+                        <svg class="w-4 h-4 transition-transform duration-200" :class="teamsOpen ? 'rotate-180' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7"/></svg>
+                    </div>
+
+                    <div x-show="teamsOpen"
+                         x-transition:enter="transition-all ease-out duration-200"
+                         x-transition:enter-start="opacity-0 max-h-0"
+                         x-transition:enter-end="opacity-100 max-h-48"
+                         x-transition:leave="transition-all ease-in duration-150"
+                         x-transition:leave-start="opacity-100 max-h-48"
+                         x-transition:leave-end="opacity-0 max-h-0"
+                         class="overflow-hidden pl-4 space-y-1 my-1 border-l-2 border-blue-100 ml-4"
+                         style="display: none;">
+                        <a href="{{ url_for('teams', view='all') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'teams' and (request.args.get('view') == 'all' or not request.args.get('view')) %}text-blue-600 bg-blue-50{% endif %}"><span>All Teams</span></a>
+                        <a href="{{ url_for('teams', view='my') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'teams' and request.args.get('view') == 'my' %}text-blue-600 bg-blue-50{% endif %}"><span>My Teams</span></a>
+                        <a href="{{ url_for('teams') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'teams' %}text-blue-600 bg-blue-50{% endif %}"><span>Workspace</span></a>
+                    </div>
+                </div>
+                {% if session.get('role') == 'Admin' %}<a href="{{ url_for('automation') }}" class="nav-item {% if request.endpoint == 'automation' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></svg><span>Automation</span></a><a href="{{ url_for('audit_logs') }}" class="nav-item {% if request.endpoint == 'audit_logs' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Audit logs</span></a>{% endif %}
+                {% if session.get('role') == 'Admin' %}<a href="{{ url_for('data_center') }}" class="nav-item {% if request.endpoint == 'data_center' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg><span>Import / Export</span></a>{% endif %}
+            </nav>
+            <div class="sidebar-spacer"></div>
+            <div class="sidebar-status"><span class="status-pulse"></span><div><strong>System online</strong><small>All services operational</small></div></div>
+                        <div class="sidebar-footer">TaskHQ <span>v2.1</span></div>
+
+        </aside>
+
+        <main class="main-content">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}<div class="flash-stack">{% for category, message in messages %}<div class="flash-message {{ 'flash-success' if category == 'success' else 'flash-error' }}" role="alert"><span>{{ 'Success' if category == 'success' else 'Notice' }}</span>{{ message }}<button class="flash-close" type="button" aria-label="Dismiss message">&times;</button></div>{% endfor %}</div>{% endif %}
+            {% endwith %}
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

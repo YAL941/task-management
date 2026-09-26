@@ -1,0 +1,417 @@
+{% extends "base.html" %}
+
+{% block title %}{{ team.name }} - TaskHQ{% endblock %}
+
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Team workspace</p>
+    <h1>{{ team.name }}</h1>
+    <p class="page-subtitle">Team overview, collaboration, and live delivery status.</p>
+  </div>
+    <div style="display: flex; gap: 10px; align-items: center;">
+    {% if team.meeting_status == 'Live' %}
+      <a class="primary-action" href="{{ team.meeting_url }}" target="_blank" rel="noreferrer" style="background: #dc2626;">JOIN LIVE NOW <span>●</span></a>
+      {% if can_manage_meetings %}
+      <form action="{{ url_for('end_meeting', team_id=team.id) }}" method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="secondary-action" type="submit" style="color: #dc2626; border-color: #dc2626;">End Meeting</button>
+      </form>
+      {% endif %}
+    {% else %}
+      {% if can_manage_meetings %}
+        {% if team.meeting_url %}
+        <form action="{{ url_for('start_meeting', team_id=team.id) }}" method="POST" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="primary-action" type="submit">Start Live Meeting <span>→</span></button>
+        </form>
+        {% else %}
+        <span class="status-badge status-neutral">Add URL to Start Live</span>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  </div>
+
+</div>
+
+<section class="metric-grid" style="max-width: 1160px; margin: 0 auto 20px; display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:14px;">
+  <div class="metric-card card-surface">
+    <small>Total tasks</small>
+    <strong>{{ total_tasks }}</strong>
+  </div>
+  <div class="metric-card card-surface">
+    <small>Completed</small>
+    <strong>{{ completed_tasks }}</strong>
+  </div>
+  <div class="metric-card card-surface">
+    <small>Member count</small>
+    <strong>{{ member_count }}</strong>
+  </div>
+  <div class="metric-card card-surface">
+    <small>Live meetings</small>
+    <strong>{{ total_meetings }}</strong>
+  </div>
+</section>
+
+<section class="metric-grid" style="max-width: 1160px; margin: -10px auto 20px; display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:14px;">
+  <div class="metric-card card-surface">
+    <small>Meeting hours</small>
+    <strong>{{ total_hours }}h</strong>
+  </div>
+  <div class="metric-card card-surface">
+    <small>Open work</small>
+    <strong>{{ pending_tasks }}</strong>
+  </div>
+  <div class="metric-card card-surface">
+    <small>Overdue</small>
+    <strong>{{ overdue_tasks }}</strong>
+  </div>
+  <div class="metric-card card-surface" style="background: var(--blue); color: white;">
+    <small style="color: rgba(255,255,255,0.8);">Success rate</small>
+    <strong>{% if total_tasks > 0 %}{{ ((completed_tasks / total_tasks) * 100)|round(0) }}{% else %}100{% endif %}%</strong>
+  </div>
+</section>
+
+
+<div style="max-width: 1160px; margin: 0 auto; display: grid; gap: 14px; grid-template-columns: 1.15fr 0.85fr;">
+  <section class="card-surface" style="padding:24px;">
+    <div class="form-section-title" style="margin-bottom:16px;">
+      <span class="form-number">01</span>
+      <div>
+        <strong>Team snapshot</strong>
+        <small>Overview for this working group.</small>
+      </div>
+    </div>
+
+    <div class="team-badges" style="margin-bottom:18px;">
+      <span class="status-badge {% if team.meeting_status == 'Live' %}status-live{% elif team.meeting_status == 'Paused' %}status-paused{% else %}status-scheduled{% endif %}">{{ team.meeting_status or 'Scheduled' }}</span>
+      <span class="status-badge status-neutral">{{ team.status or 'Active' }}</span>
+    </div>
+
+    <p style="margin:0 0 18px; color:var(--muted); line-height:1.7;">{{ team.description or 'No description added for this team yet.' }}</p>
+
+    <div class="mini-metrics" style="margin:0;">
+      <div>
+        <small>Leader</small>
+        <span>{% for user in users %}{% if user.id == team.leader_id %}{{ user.username }}{% endif %}{% endfor %}</span>
+      </div>
+      <div>
+        <small>Meeting time</small>
+        <span>{{ team.meeting_time[:16] if team.meeting_time else 'Not scheduled yet' }}</span>
+      </div>
+      <div>
+        <small>Meeting room</small>
+        {% if team.meeting_url %}<a href="{{ team.meeting_url }}" target="_blank" rel="noreferrer">Open link</a>{% else %}<span>No room set</span>{% endif %}
+      </div>
+      <div>
+        <small>Members</small>
+        <span data-team-member-count>{{ members|length }}</span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="card-surface" style="padding:24px;">
+    <div class="form-section-title" style="margin-bottom:16px;">
+      <span class="form-number">02</span>
+      <div>
+        <strong>Members</strong>
+        <small>People assigned to this group.</small>
+      </div>
+    </div>
+    <div data-team-members data-can-manage-members="{{ 'true' if can_manage_members else 'false' }}" data-leader-id="{{ team.leader_id }}" style="display:grid; gap:10px;">
+      {% for member in members %}
+      <div data-team-member data-member-id="{{ member.id }}" style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px; border:1px solid #edf2f7; border-radius:10px; background:#f8fafc;">
+        <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+          <span class="avatar" style="width:32px; height:32px; font-size:12px;">{{ member.username[0]|upper }}</span>
+          <div>
+            <strong style="display:block; font-size:11px;">{{ member.username }}</strong>
+            <small style="display:block; color:var(--muted); font-size:10px;">ID {{ member.id }} · {{ member.role }}</small>
+          </div>
+        </div>
+        <span class="status-badge status-neutral">Active</span>
+        {% if can_manage_members and member.id != team.leader_id %}
+        <form method="POST" onsubmit="return confirm('Remove this team member?');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="action" value="remove_member">
+          <input type="hidden" name="member_id" value="{{ member.id }}">
+          <button class="logout-link" type="submit">Remove</button>
+        </form>
+        {% endif %}
+      </div>
+      {% else %}
+      <p id="team-members-empty" style="margin:0; color:var(--muted);">No members assigned yet.</p>
+      {% endfor %}
+    </div>
+    {% if can_manage_members %}
+    <form method="POST" data-team-member-form style="display:flex; align-items:flex-end; gap:8px; margin-top:14px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="add_member">
+      <label class="form-label" style="flex:1; margin-top:0;">User ID(s)
+        <input class="field" name="user_ids" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 12, 15, 27" required>
+      </label>
+      <button class="secondary-action" type="submit">Add</button>
+    </form>
+    <p data-team-member-status role="alert" aria-live="assertive" hidden style="margin:8px 0 0; color:#b91c1c; font-size:12px;"></p>
+    {% endif %}
+  </aside>
+</div>
+
+{% if is_team_manager %}
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <div class="form-section-title" style="margin-bottom:16px;">
+      <span class="form-number">03</span>
+    <div>
+      <strong>Member permissions</strong>
+      <small>Assign workspace access to regular members. Admin accounts are managed globally.</small>
+    </div>
+  </div>
+  <div style="display:grid; gap:12px;">
+    {% for member in members if member.role != 'Admin' %}
+    <form method="POST" style="display:grid; gap:12px; padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="permissions">
+      <input type="hidden" name="member_id" value="{{ member.id }}">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="avatar" style="width:34px; height:34px;">{{ member.username[0]|upper }}</span>
+          <div><strong style="display:block; font-size:12px;">{{ member.username }}</strong><small style="color:var(--muted); font-size:10px;">{{ member.role }} · team access</small></div>
+        </div>
+        <button class="secondary-action" type="submit">Save access</button>
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px;">
+        {% for permission, label in permission_options %}
+        <label style="display:flex; align-items:center; gap:8px; padding:9px 10px; border:1px solid #e5eaf1; border-radius:9px; background:#fff; color:#475569; font-size:11px;">
+          <input type="checkbox" name="permission_{{ permission }}" {% if permission in member_access[member.id] %}checked{% endif %} style="accent-color:var(--blue);">
+          {{ label }}
+        </label>
+        {% endfor %}
+      </div>
+    </form>
+    {% else %}
+    <p style="margin:0; color:var(--muted);">No regular members are available for team permissions.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <div class="form-section-title" style="margin-bottom:16px;">
+    <span class="form-number">04</span>
+    <div>
+      <strong>Operations dashboard</strong>
+      <small>Delivery flow and pressure points for this team.</small>
+    </div>
+  </div>
+
+  <div style="display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:12px; margin-bottom:18px;">
+    <div style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#f8fafc;">
+      <small style="display:block; color:var(--muted);">Pending</small>
+      <strong style="font-size:24px;">{{ status_summary['Pending'] }}</strong>
+    </div>
+    <div style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#f8fafc;">
+      <small style="display:block; color:var(--muted);">In progress</small>
+      <strong style="font-size:24px;">{{ status_summary['In Progress'] }}</strong>
+    </div>
+    <div style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#f8fafc;">
+      <small style="display:block; color:var(--muted);">High priority</small>
+      <strong style="font-size:24px;">{{ priority_summary['High'] }}</strong>
+    </div>
+    <div style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#f8fafc;">
+      <small style="display:block; color:var(--muted);">Next due</small>
+      <strong style="font-size:18px;">{{ next_due_task.due_date if next_due_task else 'No date' }}</strong>
+    </div>
+  </div>
+
+  {% if next_due_task %}
+  <div style="padding:14px 16px; border:1px solid #dbeafe; border-radius:12px; background:#eff6ff; color:#1e3a8a;">
+    <strong>Next focus:</strong> {{ next_due_task.title }} · {{ next_due_task.priority }} priority · due {{ next_due_task.due_date }}
+  </div>
+  {% endif %}
+</section>
+
+{% if is_team_manager %}
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="action" value="update_team">
+    <div class="form-section-title" style="margin-bottom:16px;">
+        <span class="form-number">05</span>
+      <div>
+        <strong>Manage team details</strong>
+        <small>Keep the workspace aligned with operations and meetings.</small>
+      </div>
+    </div>
+    <div class="form-grid">
+      <label class="form-label">Team name<input class="field" name="name" value="{{ team.name }}" required maxlength="100"></label>
+      <label class="form-label">Team leader<select class="field" name="leader_id" required>
+        {% for user in users %}<option value="{{ user.id }}" {% if user.id == team.leader_id %}selected{% endif %}>{{ user.username }}</option>{% endfor %}
+      </select></label>
+    </div>
+    <label class="form-label">Description<textarea class="field" name="description" rows="3">{{ team.description or '' }}</textarea></label>
+    <div class="form-grid">
+      <label class="form-label">Meeting status<select class="field" name="meeting_status">
+        <option value="Scheduled" {% if team.meeting_status == 'Scheduled' %}selected{% endif %}>Scheduled</option>
+        <option value="Paused" {% if team.meeting_status == 'Paused' %}selected{% endif %}>Paused</option>
+      </select></label>
+      <label class="form-label">Meeting time<input class="field" name="meeting_time" type="datetime-local" value="{{ team.meeting_time[:16] if team.meeting_time else '' }}"></label>
+    </div>
+    <label class="form-label">Meeting link<input class="field" name="meeting_url" type="url" value="{{ team.meeting_url or '' }}" placeholder="https://meet.google.com/... "></label>
+    <div class="form-actions" style="justify-content:flex-end; margin-top:16px;">
+      <button class="primary-action" type="submit">Save team settings <span>→</span></button>
+    </div>
+  </form>
+</section>
+{% endif %}
+
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <div class="form-section-title" style="margin-bottom:16px;">
+    <span class="form-number">06</span>
+    <div>
+      <strong>Member workload</strong>
+      <small>Who is carrying the team load and where attention is needed.</small>
+    </div>
+  </div>
+
+  {% if member_stats %}
+  <div style="display:grid; gap:12px;">
+    {% for item in member_stats %}
+    <div style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="avatar" style="width:36px; height:36px;">{{ item.user.username[0]|upper }}</span>
+          <div>
+            <strong style="display:block; font-size:13px;">{{ item.user.username }}</strong>
+            <small style="color:var(--muted);">{{ item.total }} tasks · {{ item.overdue }} overdue</small>
+          </div>
+        </div>
+        <strong>{{ item.health }}%</strong>
+      </div>
+      <div class="team-health-bar" style="height:10px; border-radius:999px; background:#e2e8f0; overflow:hidden;">
+        <span style="display:block; height:100%; border-radius:999px; background:linear-gradient(90deg, #22c55e, #2563eb); width:{{ item.health }}%;"></span>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin-top:8px; color:var(--muted); font-size:11px;">
+        <span>{{ item.completed }} complete</span>
+        <span>{{ item.open }} open</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state card-surface" style="margin-top:0;">
+    <span class="empty-state-icon">◎</span>
+    <strong>No member workload yet</strong>
+    <p>Add members or assign tasks to see team balance.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <div class="form-section-title" style="margin-bottom:16px;">
+    <span class="form-number">07</span>
+    <div>
+      <strong>Team chat</strong>
+      <small>Messages shared inside this working group.</small>
+    </div>
+  </div>
+
+  {% if can_post_messages %}
+  <form method="POST" data-team-chat-form style="display:grid; gap:12px; margin-bottom:20px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <textarea name="message" rows="3" class="field" placeholder="Write a quick update for the team..." required></textarea>
+    <div style="display:flex; justify-content:flex-end;">
+      <button type="submit" class="primary-action">Send message <span>→</span></button>
+    </div>
+  </form>
+  {% else %}
+  <p style="color:var(--muted);">You have read-only access to team messages.</p>
+  {% endif %}
+
+  <div id="team-chat-messages" data-team-chat-messages style="display:grid; gap:12px;">
+    {% if team_messages %}
+    {% for message in team_messages %}
+    <div data-team-chat-message style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
+        <strong style="font-size:13px;">{{ user_lookup[message.user_id].username if message.user_id in user_lookup else 'User' }}</strong>
+        <small style="color:var(--muted); font-size:10px;">{{ message.created_at }}</small>
+      </div>
+      <p style="margin:0; color:var(--ink); line-height:1.6;">{{ message.body }}</p>
+    </div>
+    {% endfor %}
+    {% else %}
+  <div id="team-chat-empty" class="empty-state card-surface" style="margin-top:0;">
+    <span class="empty-state-icon">◎</span>
+    <strong>No messages yet</strong>
+    <p>Share a quick update with the team to keep everyone aligned.</p>
+  </div>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <div class="form-section-title" style="margin-bottom:16px;">
+    <span class="form-number">08</span>
+    <div>
+      <strong>Quick task</strong>
+      <small>Create work directly in this team workspace.</small>
+    </div>
+  </div>
+
+  {% if can_create_tasks %}
+  <form method="POST" style="display:grid; gap:12px; margin-bottom:20px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="action" value="create_team_task">
+    <div class="form-grid">
+      <label class="form-label">Task title<input class="field" name="title" required maxlength="100"></label>
+      <label class="form-label">Assignee<select class="field" name="assignee_id" required>
+        {% for member in members %}<option value="{{ member.id }}">{{ member.username }}</option>{% endfor %}
+      </select></label>
+    </div>
+    <div class="form-grid">
+      <label class="form-label">Priority<select class="field" name="priority">
+        <option value="Low">Low</option>
+        <option value="Medium" selected>Medium</option>
+        <option value="High">High</option>
+      </select></label>
+      <label class="form-label">Due date<input class="field" name="due_date" type="date"></label>
+    </div>
+    <label class="form-label">Details<textarea class="field" name="description" rows="3" placeholder="What needs to happen?"></textarea></label>
+    <div style="display:flex; justify-content:flex-end;">
+      <button type="submit" class="primary-action">Create team task <span>→</span></button>
+    </div>
+  </form>
+  {% else %}
+  <p style="color:var(--muted);">You do not have permission to create team tasks.</p>
+  {% endif %}
+</section>
+
+<section class="card-surface" style="max-width:1160px; margin:16px auto 0; padding:24px;">
+  <div class="form-section-title" style="margin-bottom:16px;">
+    <span class="form-number">09</span>
+    <div>
+      <strong>Team tasks</strong>
+      <small>Work currently connected to this group.</small>
+    </div>
+  </div>
+
+  {% if tasks %}
+  <div style="display:grid; gap:12px;">
+    {% for task in tasks %}
+    <div style="display:flex; justify-content:space-between; gap:12px; align-items:center; padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
+      <div>
+        <strong style="display:block; font-size:13px;">{{ task.title }}</strong>
+        <small style="display:block; color:var(--muted); margin-top:4px;">{{ task.status }} · {{ task.priority }} · Due {{ task.due_date or 'No date' }}</small>
+      </div>
+      <a href="{{ url_for('tasks') }}?q={{ task.title|urlencode }}" class="secondary-action" style="padding:9px 12px;">View</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state card-surface" style="margin-top:0;">
+    <span class="empty-state-icon">◎</span>
+    <strong>No tasks for this team yet</strong>
+    <p>Assign work to the group or add members to begin planning.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

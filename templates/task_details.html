@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}Task Details - {{ task.title }}{% endblock %}
+
+{% block content %}
+<div x-data="{ statusAction: '', statusComment: '', deleteComment: '' }">
+  <div class="page-head">
+    <div>
+      <p class="eyebrow">Task workspace</p>
+      <h1>Task Details</h1>
+      <p class="page-subtitle">Review the task, activity, and actions connected to this work.</p>
+    </div>
+    <a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>-></span></a>
+  </div>
+
+  <section class="card-surface settings-card" style="max-width:960px; margin:0 auto;">
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">01</span>
+        <div>
+          <strong>Task details</strong>
+          <small>Core information and ownership for this task.</small>
+        </div>
+      </div>
+
+      <div class="mini-metrics" style="margin:0 0 20px; grid-template-columns:repeat(3, minmax(0, 1fr));">
+        <div><small>Task ID</small><span>{{ task.id }}</span></div>
+        <div><small>Sender ID</small><span>{{ task.creator_id or '-' }}</span></div>
+        <div><small>Assignee ID</small><span>{{ task.user_id or '-' }}</span></div>
+      </div>
+
+      <div class="form-label">
+        Title
+        <div class="field" style="font-weight:700;">{{ task.title }}</div>
+      </div>
+      <div class="form-label">
+        Description
+        <div class="field" style="min-height:110px; white-space:pre-wrap;">{{ detail.description if detail and detail.description else 'No description provided.' }}</div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-label">Priority<div class="field">{{ task.priority }}</div></div>
+        <div class="form-label">Status<div class="field">{{ task.status }}</div></div>
+        <div class="form-label">Due date<div class="field">{{ task.due_date or '-' }}</div></div>
+        <div class="form-label">Completed at<div class="field">{{ task.completed_at or '-' }}</div></div>
+      </div>
+    </div>
+
+    {% if can_change_status %}
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">02</span>
+        <div>
+          <strong>Update status</strong>
+          <small>Only the recipient can complete or reject this task.</small>
+        </div>
+      </div>
+      <form :action="'/update_task_status/{{ task.id }}/' + statusAction" method="POST" style="display:grid; gap:12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="form-label">Action<select class="field" name="status_choice" x-model="statusAction" required>
+          <option value="">Choose an action</option>
+          <option value="In Progress">In Progress</option>
+          <option value="Completed">Complete</option>
+          <option value="Rejected">Reject</option>
+        </select></label>
+        <div x-show="['Completed', 'Rejected'].includes(statusAction)" x-cloak>
+          <label class="form-label">Comment<textarea class="field" name="comment" x-model="statusComment" :required="['Completed', 'Rejected'].includes(statusAction)" rows="3" placeholder="Add a note about this action..."></textarea></label>
+        </div>
+        <div class="form-actions"><button class="primary-action" type="submit">Apply status <span>-></span></button></div>
+      </form>
+    </div>
+    {% endif %}
+
+    {% if can_manage_task %}
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">03</span>
+        <div>
+          <strong>Sender controls</strong>
+          <small>The sender can update or remove this task.</small>
+        </div>
+      </div>
+      <div class="form-actions" style="justify-content:flex-start; padding:0 0 14px;">
+        <a href="{{ url_for('edit_task', id=task.id) }}" class="secondary-action">Edit task</a>
+      </div>
+      <form action="{{ url_for('delete_task', id=task.id) }}" method="POST" style="display:grid; gap:12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="form-label">Delete reason<textarea class="field" name="comment" required rows="3" placeholder="Add a reason before deleting..."></textarea></label>
+        <button class="logout-link" type="submit" style="width:auto; border:1px solid #fecdd3; border-radius:9px; color:#b91c1c; background:#fff1f2;">Delete task</button>
+      </form>
+    </div>
+    {% endif %}
+
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">04</span>
+        <div>
+          <strong>Comments</strong>
+          <small>Activity recorded against this task.</small>
+        </div>
+      </div>
+      <div style="display:grid; gap:10px;">
+        {% for comment in comments %}
+        <article style="padding:13px 15px; border:1px solid #edf2f7; border-radius:10px; background:#fbfdff;">
+          <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:6px;">
+            <strong style="font-size:12px;">User ID {{ comment.user_id }}</strong>
+            <small style="color:var(--muted); font-size:10px;">{{ comment.created_at }}</small>
+          </div>
+          <p style="margin:0; color:var(--ink); line-height:1.6;">{{ comment.body }}</p>
+        </article>
+        {% else %}
+        <div class="empty-state" style="min-height:120px; padding:18px;"><strong>No comments yet</strong><p>Add a comment when changing the task status.</p></div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}

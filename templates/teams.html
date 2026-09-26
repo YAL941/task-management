@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+
+{% block title %}Teams - TaskHQ{% endblock %}
+
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">People and ownership</p>
+    <h1>Teams</h1>
+    <p class="page-subtitle">Organize work around the people responsible for delivering it.</p>
+  </div>
+</div>
+
+<section class="card-surface settings-card" style="margin-bottom: 20px;">
+  <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div class="inline-flex rounded-full bg-slate-100 p-1 shadow-inner">
+      <a href="{{ url_for('teams', view='all') }}" class="rounded-full px-4 py-2 text-sm font-medium transition-colors {% if current_view == 'all' %}bg-white text-slate-900 shadow-sm{% else %}text-slate-600 hover:text-slate-900{% endif %}">All Teams</a>
+      <a href="{{ url_for('teams', view='my') }}" class="rounded-full px-4 py-2 text-sm font-medium transition-colors {% if current_view == 'my' %}bg-white text-slate-900 shadow-sm{% else %}text-slate-600 hover:text-slate-900{% endif %}">My Teams</a>
+    </div>
+    <div class="flex flex-wrap items-center gap-3 text-sm">
+      <span class="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">
+        <span class="h-2 w-2 rounded-full bg-emerald-500"></span>
+        {{ teams|length }} active teams
+      </span>
+      <span class="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-blue-700">
+        <span class="h-2 w-2 rounded-full bg-blue-500"></span>
+        {{ users|length }} people in workspace
+      </span>
+    </div>
+  </div>
+</section>
+
+{% if session.get('role') in ['Admin', 'Manager'] %}
+<section class="card-surface settings-card">
+  <form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">01</span>
+        <div>
+          <strong>Create a team workspace</strong>
+          <small>Every team needs a leader, members, and a meeting space.</small>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label class="form-label">Team name<input class="field" name="name" required maxlength="100"></label>
+        <label class="form-label">Team leader<select class="field" name="leader_id" required>
+          <option value="">Choose a leader</option>
+          {% for user in users %}<option value="{{ user.id }}">{{ user.username }}</option>{% endfor %}
+        </select></label>
+      </div>
+      <label class="form-label">Description<textarea class="field" name="description" rows="3"></textarea></label>
+      <div class="form-grid">
+        <label class="form-label">Meeting status<select class="field" name="meeting_status">
+          <option value="Scheduled">Scheduled</option>
+          <option value="Paused">Paused</option>
+        </select></label>
+        <label class="form-label">Meeting time<input class="field" name="meeting_time" type="datetime-local"></label>
+      </div>
+      <label class="form-label">Meeting link<input class="field" name="meeting_url" type="url" placeholder="https://meet.google.com/... "></label>
+      <div class="form-actions">
+        <button class="primary-action" type="submit">Create team <span>→</span></button>
+      </div>
+    </div>
+  </form>
+</section>
+{% endif %}
+
+<section class="teams-grid">
+  {% for team in teams %}
+  <article class="card-surface team-card">
+    <div class="team-card-head">
+      <div>
+        <span class="panel-kicker">Active team</span>
+        <h2>{{ team.name }}</h2>
+      </div>
+      <span class="table-count">{{ members[team.id]|length }} members</span>
+    </div>
+
+    <div class="team-badges">
+      <span class="status-badge {% if team.meeting_status == 'Live' %}status-live{% elif team.meeting_status == 'Paused' %}status-paused{% else %}status-scheduled{% endif %}">{{ team.meeting_status or 'Scheduled' }}</span>
+      <span class="status-badge status-neutral">{{ team.status or 'Active' }}</span>
+    </div>
+
+    <p>{{ team.description or 'No description added.' }}</p>
+
+    <div class="team-leader">
+      <span class="avatar">{% for user in users %}{% if user.id == team.leader_id %}{{ user.username[0]|upper }}{% endif %}{% endfor %}</span>
+      <span>
+        <strong>Team leader</strong>
+        <small>{% for user in users %}{% if user.id == team.leader_id %}{{ user.username }}{% endif %}{% endfor %}</small>
+      </span>
+    </div>
+
+    <div style="margin-top:12px; display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:8px;">
+      <div style="padding:10px 8px; border-radius:10px; background:#f8fafc; border:1px solid #edf2f7; text-align:center;">
+        <small style="display:block; color:var(--muted);">Tasks</small>
+        <strong>{{ team_summary[team.id].total }}</strong>
+      </div>
+      <div style="padding:10px 8px; border-radius:10px; background:#f8fafc; border:1px solid #edf2f7; text-align:center;">
+        <small style="display:block; color:var(--muted);">Open</small>
+        <strong>{{ team_summary[team.id].open }}</strong>
+      </div>
+      <div style="padding:10px 8px; border-radius:10px; background:#f8fafc; border:1px solid #edf2f7; text-align:center;">
+        <small style="display:block; color:var(--muted);">Due</small>
+        <strong>{{ team_summary[team.id].overdue }}</strong>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:11px; color:var(--muted);">
+        <span>Team progress</span>
+        <strong>{{ team_summary[team.id].progress }}%</strong>
+      </div>
+      <div class="team-health-bar" style="height:10px; border-radius:999px; background:#e2e8f0; overflow:hidden;">
+        <span style="display:block; height:100%; border-radius:999px; background:linear-gradient(90deg, #22c55e, #2563eb); width:{{ team_summary[team.id].progress }}%;"></span>
+      </div>
+    </div>
+
+    <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center; gap:10px;">
+      <a href="{{ url_for('team_detail', team_id=team.id) }}" class="secondary-action" style="width:100%; text-align:center;">Open workspace</a>
+    </div>
+
+    <div class="mini-metrics">
+      <div>
+        <small>Meeting</small>
+        {% if team.meeting_url %}<a href="{{ team.meeting_url }}" target="_blank" rel="noreferrer">Open room</a>{% else %}<span>No room set</span>{% endif %}
+      </div>
+      <div>
+        <small>Schedule</small>
+        <span>{{ team.meeting_time[:16] if team.meeting_time else 'Not scheduled yet' }}</span>
+      </div>
+    </div>
+
+    {% if session.get('role') in ['Admin', 'Manager'] %}
+    <form method="POST" class="team-member-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="member">
+      <input type="hidden" name="team_id" value="{{ team.id }}">
+      <select class="field" name="user_id" required>
+        <option value="">Add member</option>
+        {% for user in users %}<option value="{{ user.id }}">{{ user.username }}</option>{% endfor %}
+      </select>
+      <button class="secondary-action" type="submit">Add</button>
+    </form>
+    <form method="POST" onsubmit="return confirm('Delete this team?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="delete">
+      <input type="hidden" name="team_id" value="{{ team.id }}">
+      <button class="logout-link" type="submit">Delete team</button>
+    </form>
+    {% endif %}
+  </article>
+  {% else %}
+  <div class="empty-state card-surface">
+    <span class="empty-state-icon">◎</span>
+    <strong>No teams yet</strong>
+    <p>Create a team to assign work collectively.</p>
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}

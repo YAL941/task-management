@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+
+{% block title %}TaskHQ - Tasks{% endblock %}
+
+{% block content %}
+<div x-data="{ 
+        activeTab: '{{ initial_tab|default('inbox') }}', 
+        openModal: false, 
+        completeModalOpen: false,
+        viewModalOpen: false,
+        selectedTask: { id: '', title: '', assignee: '', assignee_id: '', sender_id: '', priority: '', status: '', due_date: '', description: '', can_change_status: false, can_manage_task: false },
+        statusAction: '',
+        statusComment: '',
+        deleteComment: '',
+        searchQuery: '', 
+        statusFilter: 'All', 
+        priorityFilter: 'All',
+        focusTask: {{ focus_task|default(none)|tojson|forceescape }}
+    }"
+    x-init="if (focusTask) { selectedTask = focusTask; viewModalOpen = true }"
+    @scroll.window="window.dispatchEvent(new CustomEvent('close-dropdowns'))">
+
+    <!-- Breadcrumb Header -->
+    <nav class="text-sm text-gray-500 mb-6">
+        <ol class="flex items-center space-x-2">
+            <li><a href="{{ url_for('index') }}" class="hover:underline">Dashboard</a></li>
+            <li><span class="text-gray-400">›</span></li>
+            <li class="text-gray-800 font-medium">Tasks</li>
+        </ol>
+    </nav>
+
+    <!-- Top Card Section with Modal Trigger -->
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-6 mb-8">
+        <div class="flex justify-between items-start mb-6">
+            <div>
+                <h1 class="text-2xl font-semibold text-gray-900 mb-1">Task Management</h1>
+                <p class="text-sm text-gray-600">
+                    Create, manage, and track tasks efficiently with real-time indicators.
+                </p>
+            </div>
+            <button @click="openModal = true" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2.5 rounded shadow-sm transition-colors focus:outline-none">
+                Add New Task
+            </button>
+        </div>
+
+        <!-- مؤشرات الأداء السريعة -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="bg-blue-50/50 border border-blue-100 rounded-lg p-4">
+                <p class="text-xs font-medium text-blue-600 uppercase">Total Tasks</p>
+                <p class="text-2xl font-bold text-blue-900 mt-1">{{ total_tasks }}</p>
+            </div>
+
+            <div class="bg-yellow-50/50 border border-yellow-100 rounded-lg p-4">
+                <p class="text-xs font-medium text-yellow-600 uppercase">Pending Tasks</p>
+                <p class="text-2xl font-bold text-yellow-900 mt-1">{{ pending_tasks }}</p>
+            </div>
+
+            <div class="bg-green-50/50 border border-green-100 rounded-lg p-4">
+                <p class="text-xs font-medium text-green-600 uppercase">Completed Tasks</p>
+                <p class="text-2xl font-bold text-green-900 mt-1">{{ completed_tasks }}</p>
+            </div>
+
+            <div class="bg-red-50/50 border border-red-100 rounded-lg p-4">
+                <p class="text-xs font-medium text-red-600 uppercase">Overdue Tasks</p>
+                <p class="text-2xl font-bold text-red-900 mt-1">{{ overdue_tasks }}</p>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Data Table Card -->
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm">
+        
+        <!-- شريط البحث والتصفية -->
+        <div class="px-6 py-4 border-b border-gray-200 flex flex-col md:flex-row justify-between items-center gap-4 bg-gray-50/50">
+            <h2 class="text-lg font-medium text-gray-900" x-text="
+                activeTab === 'all' ? 'All Tasks List' :
+                (activeTab === 'inbox' ? 'Inbox Tasks List' :
+                (activeTab === 'sent' ? 'Tasks You Sent' : 
+                (activeTab === 'received' ? 'Received Tasks List' :
+                (activeTab === 'replied' ? 'Replied Tasks List' : 'All Priority Tasks'))))
+            "></h2>
+            
+            <div class="flex items-center space-x-3 w-full md:w-auto">
+                <div class="relative w-full md:w-64">
+                    <input type="text" x-model="searchQuery" placeholder="Search tasks..." class="w-full pl-9 pr-4 py-1.5 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+                    <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                </div>
+
+                <select x-model="statusFilter" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+                    <option value="All">All Status</option>
+                    <option value="Pending">Pending</option>
+                    <option value="In Progress">In Progress</option>
+                    <option value="Completed">Completed</option>
+                </select>
+
+                <select x-model="priorityFilter" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+                    <option value="All">All Priorities</option>
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Table Container -->
+        <div class="overflow-x-auto relative min-h-[300px]">
+            <table class="w-full text-left border-collapse whitespace-nowrap">
+                <thead class="bg-gray-50">
+                    <tr class="border-b border-gray-200 text-xs text-gray-500 uppercase tracking-wider">
+                        <th class="px-6 py-3 font-medium">ID</th>
+                        <th class="px-6 py-3 font-medium">Title</th>
+                        <th class="px-6 py-3 font-medium">Sender ID</th>
+                        <th class="px-6 py-3 font-medium">Assignee ID</th>
+                        <th class="px-6 py-3 font-medium">Priority</th>
+                        <th class="px-6 py-3 font-medium">Status</th>
+                        <th class="px-6 py-3 font-medium">Due Date</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 text-sm">
+                    {% if tasks %}
+                        {% for task in tasks %}
+                        {% set t_title = task[1] | string %}
+                        {% set t_status = task[2] if task|length > 2 and task[2] else 'Pending' %}
+                        {% set t_priority = task[3] if task|length > 3 and task[3] else 'Medium' %}
+                        {% set t_duedate = task[4] if task|length > 4 and task[4] else '' %}
+                        {% set t_assignee = task[5] if task|length > 5 and task[5] else 'Unassigned' %}
+                        {% set t_desc = task[6] if task|length > 6 and task[6] else 'No description provided' %}
+                        {% set t_sender = task[7] if task|length > 7 and task[7] else session.get('username') %}
+                        {% set t_sender_id = task[9] if task|length > 9 and task[9] else '-' %}
+                        {% set t_assignee_id = task[10] if task|length > 10 and task[10] else '-' %}
+                        {% set t_has_replied = task[8] if task|length > 8 and task[8] else false %}
+                        
+                        <!-- صف الجدول قابل للنقر لعرض التفاصيل -->
+                        <tr class="hover:bg-blue-50/50 transition-colors cursor-pointer"
+                            @click="window.location.href = '{{ url_for('task_view', task_id=task[0]) }}'"
+                            data-task-id="{{ task[0] }}"
+                            x-show="(
+                                activeTab === 'all' ||
+                                ((activeTab === 'inbox' || activeTab === 'received') && '{{ t_assignee }}' === '{{ session.get('username') }}') ||
+                                (activeTab === 'sent' && '{{ t_sender_id }}' === '{{ session.get('user_id') }}') ||
+                                (activeTab === 'replied' && ('{{ t_has_replied }}' === 'True' || '{{ t_has_replied }}' === '1')) ||
+                                (activeTab === 'urgent')
+                            ) &&
+                            (searchQuery === '' || '{{ t_title | lower }}'.includes(searchQuery.toLowerCase())) &&
+                            (statusFilter === 'All' || '{{ t_status }}' === statusFilter) &&
+                            (priorityFilter === 'All' || '{{ t_priority }}' === priorityFilter)">
+                            
+                            <td class="px-6 py-4 font-medium text-gray-500">{{ task[0] }}</td>
+                            <td class="px-6 py-4 font-medium text-gray-900">{{ task[1] }}</td>
+                            <td class="px-6 py-4 text-gray-600">{{ t_sender_id }}</td>
+                            <td class="px-6 py-4 text-gray-600">
+                                <span class="block text-xs font-semibold text-gray-800">{{ t_assignee_id }}</span>
+                            </td>
+                            <td class="px-6 py-4">
+                                <span class="px-2.5 py-1 text-xs font-semibold rounded-full {% if t_priority == 'High' %}bg-red-100 text-red-800{% elif t_priority == 'Medium' %}bg-yellow-100 text-yellow-800{% else %}bg-gray-100 text-gray-700{% endif %}">
+                                    {{ t_priority }}
+                                </span>
+                            </td>
+                            <td class="px-6 py-4">
+                                {% if t_status == 'Completed' %}
+                                    <span class="px-2.5 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">Completed</span>
+                                {% elif t_status == 'In Progress' %}
+                                    <span class="px-2.5 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">In Progress</span>
+                                {% else %}
+                                    <span class="px-2.5 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800">Pending</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-6 py-4 text-xs font-medium text-gray-600">
+                                {{ t_duedate if t_duedate else '-' }}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr>
+                            <td colspan="7" class="text-center py-12 text-gray-400">No tasks added yet.</td>
+                        </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="px-6 py-3 border-t border-gray-200 flex justify-between items-center text-sm text-gray-600 bg-white">
+            <div><span>Show entries</span></div>
+            <div><span>Total: {{ tasks|length }} tasks</span></div>
+        </div>
+    </div>
+
+    <!-- نافذة عرض بيانات وتفاصيل المهمة (View Task Modal) -->
+    <div x-show="viewModalOpen" 
+         class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm"
+         style="display: none;"
+         x-transition.opacity>
+        
+        <div @click.away="viewModalOpen = false" class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-md mx-4 overflow-hidden text-left">
+            <div class="flex justify-between items-center px-6 py-4 border-b border-gray-100 bg-gray-50">
+                <h3 class="text-lg font-semibold text-gray-900">Task Details</h3>
+                <button @click="viewModalOpen = false" class="text-gray-400 hover:text-gray-600 text-lg font-bold">&times;</button>
+            </div>
+
+            <div class="p-6 space-y-4 text-sm max-h-[70vh] overflow-y-auto">
+                <div>
+                    <span class="block text-xs font-medium text-gray-400 uppercase">Task ID</span>
+                    <p class="font-semibold text-gray-800" x-text="selectedTask.id"></p>
+                </div>
+
+                <div>
+                    <span class="block text-xs font-medium text-gray-400 uppercase">Title</span>
+                    <p class="font-semibold text-gray-900 text-base" x-text="selectedTask.title"></p>
+                </div>
+
+                <!-- المكلّف يظهر بالمعرّف التعريفي فقط -->
+                <div class="grid grid-cols-2 gap-4 bg-gray-50 p-3 rounded-lg border border-gray-100">
+                    <div>
+                        <span class="block text-[10px] font-medium text-gray-400 uppercase">Sender ID</span>
+                        <p class="font-medium text-gray-800 text-xs" x-text="selectedTask.sender_id"></p>
+                    </div>
+                    <div>
+                        <span class="block text-[10px] font-medium text-gray-400 uppercase">Assignee ID</span>
+                        <p class="font-medium text-gray-800 text-xs" x-text="selectedTask.assignee_id"></p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <span class="block text-xs font-medium text-gray-400 uppercase">Priority</span>
+                        <p class="font-medium" x-text="selectedTask.priority"></p>
+                    </div>
+                    <div>
+                        <span class="block text-xs font-medium text-gray-400 uppercase">Status</span>
+                        <p class="font-medium" x-text="selectedTask.status"></p>
+                    </div>
+                </div>
+
+                <div>
+                    <span class="block text-xs font-medium text-gray-400 uppercase">Due Date</span>
+                    <p class="font-medium text-gray-800" x-text="selectedTask.due_date || '-'"></p>
+                </div>
+
+                <div>
+                    <span class="block text-xs font-medium text-gray-400 uppercase">Description</span>
+                    <div class="mt-1 p-3 bg-gray-50 rounded-lg border border-gray-200 text-gray-700 text-xs whitespace-pre-wrap" x-text="selectedTask.description"></div>
+                </div>
+
+                <form x-show="selectedTask.can_change_status" :action="'/update_task_status/' + selectedTask.id + '/' + statusAction" method="POST" class="border-t border-gray-100 pt-4 space-y-3">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 uppercase mb-1">Change status</label>
+                        <select name="status_choice" x-model="statusAction" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                            <option value="">Choose an action</option>
+                            <option value="In Progress">In Progress</option>
+                            <option value="Completed">Complete</option>
+                            <option value="Rejected">Reject</option>
+                        </select>
+                    </div>
+
+                    <div x-show="['Completed', 'Rejected'].includes(statusAction)" x-cloak>
+                        <label class="block text-xs font-medium text-gray-500 uppercase mb-1">Reason or comment</label>
+                        <textarea name="comment" x-model="statusComment" :required="['Completed', 'Rejected'].includes(statusAction)" rows="3" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="Add a note about this action..."></textarea>
+                    </div>
+
+                    <div class="flex items-center justify-between gap-3">
+                        <a :href="'/tasks/' + selectedTask.id + '/comments'" class="text-xs font-medium text-blue-600 hover:text-blue-700">View comments</a>
+                        <button type="submit" x-show="statusAction" class="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-700" :class="statusAction === 'Delete' ? 'bg-red-600 hover:bg-red-700' : ''">Apply action</button>
+                    </div>
+                </form>
+
+                <div x-show="selectedTask.can_manage_task" x-cloak class="border-t border-gray-100 pt-4 space-y-3">
+                    <div class="flex items-center justify-between gap-3">
+                        <span class="text-xs font-medium uppercase text-gray-500">Sender controls</span>
+                        <a :href="'/edit_task/' + selectedTask.id" class="rounded-lg border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-50">Edit task</a>
+                    </div>
+                    <form :action="'/delete_task/' + selectedTask.id" method="POST" class="space-y-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <textarea name="comment" x-model="deleteComment" required rows="2" class="w-full rounded-lg border border-red-200 px-3 py-2 text-sm text-gray-700 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500" placeholder="Add a reason before deleting..."></textarea>
+                        <button type="submit" class="rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-red-700">Delete task</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="flex items-center justify-end px-6 py-3 bg-gray-50 border-t border-gray-100">
+                <button type="button" @click="viewModalOpen = false" class="px-4 py-2 bg-gray-600 text-white rounded-lg text-xs hover:bg-gray-700">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- نافذة إضافة مهمة جديدة -->
+    <div x-show="openModal" 
+         class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm"
+         style="display: none;"
+         x-transition.opacity>
+        
+        <div @click.away="openModal = false" class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-lg mx-4 overflow-hidden text-left max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center px-6 py-4 border-b border-gray-100 bg-gray-50">
+                <h3 class="text-lg font-semibold text-gray-900">Create New Task</h3>
+                <button @click="openModal = false" class="text-gray-400 hover:text-gray-600 text-lg font-bold">&times;</button>
+            </div>
+
+            <form action="{{ url_for('add_task') }}" method="POST" enctype="multipart/form-data" class="p-6 space-y-4">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Title:</label>
+                    <input type="text" name="title" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="Enter task title">
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Assignee:</label>
+                    <input type="number" name="user_id" required min="1" step="1" inputmode="numeric" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="Enter assignee user ID">
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Priority:</label>
+                        <select name="priority" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none">
+                            <option value="Low">Low</option>
+                            <option value="Medium" selected>Medium</option>
+                            <option value="High">High</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Due Date:</label>
+                        <input type="date" name="due_date" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Description:</label>
+                    <textarea name="description" rows="3" class="w-full border border-gray-300 rounded-lg px-2.5 py-2 text-sm focus:outline-none" placeholder="Detailed description..."></textarea>
+                </div>
+
+                <div x-data="{ files: [] }">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Attachments (Images, Docs, Files, PDF):</label>
+                    <div class="flex items-center justify-center w-full">
+                        <label class="flex flex-col items-center justify-center w-full min-h-[96px] border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 transition p-4">
+                            <div class="flex flex-col items-center justify-center text-center">
+                                <svg class="w-5 h-5 mb-1 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 0 1-.88-7.903A5 5 0 1 1 15.9 6L16 6a5 5 0 0 1 1 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                                <p class="text-xs text-gray-500"><span class="font-semibold text-blue-600">Click to upload</span> or drag and drop</p>
+                                <p class="text-[10px] text-gray-400 mt-0.5">PDF, DOCX, PNG, JPG</p>
+                            </div>
+                            <input type="file" name="attachments" multiple accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt" class="hidden" 
+                                   @change="files = Array.from($event.target.files)" />
+                        </label>
+                    </div>
+
+                    <template x-if="files.length > 0">
+                        <div class="mt-2 space-y-1">
+                            <p class="text-xs font-semibold text-gray-600">Selected files:</p>
+                            <template x-for="file in files">
+                                <div class="flex items-center justify-between text-xs bg-blue-50 text-blue-700 px-3 py-1.5 rounded-md border border-blue-100">
+                                    <span class="truncate max-w-xs" x-text="file.name"></span>
+                                    <span class="text-[10px] text-gray-400" x-text="(file.size / 1024).toFixed(1) + ' KB'"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+
+                <div class="flex justify-end space-x-3 pt-4 border-t border-gray-100">
+                    <button type="button" @click="openModal = false" class="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                    <button type="submit" class="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">Save Task</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

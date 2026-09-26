@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Overview - TaskHQ{% endblock %}
+
+{% block content %}
+<div class="page-head">
+    <div><p class="eyebrow">Workspace overview</p><h1>Good to see you, {{ current_user.first_name if current_user else session.get('username', 'there') }}.</h1><p class="page-subtitle">A clear view of your team workload and daily progress.</p></div>
+    <a href="{{ url_for('tasks') }}" class="primary-action"><span>+</span> New task</a>
+</div>
+
+<div class="metric-grid">
+    <div class="metric-card metric-blue"><div><span class="metric-label">Visible tasks</span><strong>{{ tasks_count }}</strong><small>Across your workspace</small></div><span class="metric-icon">✓</span></div>
+    <div class="metric-card metric-slate"><div><span class="metric-label">Team members</span><strong>{{ users_count }}</strong><small>Registered accounts</small></div><span class="metric-icon">◎</span></div>
+    <div class="metric-card metric-green"><div><span class="metric-label">Your role</span><strong>{{ session.get('role', 'User') }}</strong><small>Current access level</small></div><span class="metric-icon">↗</span></div>
+</div>
+
+<div class="dashboard-grid">
+    <section class="card-surface welcome-panel">
+        <div class="panel-kicker">Your command center</div>
+        <h2>Keep work moving.</h2>
+        <p>Open Tasks to create, assign, filter, and update work. Reports gives you a concise performance view when you need to share progress.</p>
+        <div class="quick-actions"><a href="{{ url_for('tasks') }}" class="primary-action">Open task board <span>→</span></a><a href="{{ url_for('reports') }}" class="secondary-action">View reports</a></div>
+    </section>
+    <section class="card-surface checklist-panel">
+        <div class="section-title"><div><span class="panel-kicker">Shortcuts</span><h2>Common actions</h2></div><span class="section-mark">⌘</span></div>
+        <a class="shortcut-row" href="{{ url_for('tasks') }}"><span class="shortcut-icon blue">+</span><span><strong>Manage tasks</strong><small>Review your current workload</small></span><b>→</b></a>
+        {% if session.get('role') == 'Admin' %}<a class="shortcut-row" href="{{ url_for('users') }}"><span class="shortcut-icon violet">◎</span><span><strong>Manage users</strong><small>Accounts and permissions</small></span><b>→</b></a>{% endif %}
+        <a class="shortcut-row" href="{{ url_for('reports') }}"><span class="shortcut-icon green">⌁</span><span><strong>Read reports</strong><small>Progress and due dates</small></span><b>→</b></a>
+    </section>
+</div>
+{% endblock %}

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Sign in - TaskHQ</title>
+
+    <!-- تضمين مكتبة Tailwind CSS والـ Alpine.js -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body class="m-0 min-h-screen bg-[#f8fafd] p-0 text-slate-900 antialiased">
+    <main class="flex min-h-screen items-center justify-center px-4 py-8 sm:px-6">
+        <div class="w-full max-w-[960px] rounded-2xl border border-[#dadce0] bg-white shadow-[0_2px_8px_rgba(60,64,67,0.12)]">
+            <div class="grid lg:grid-cols-[0.9fr_1.1fr]">
+                <section class="hidden border-r border-[#e8eaed] p-10 lg:block">
+                    <div class="flex items-center gap-3">
+                        <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5"><path d="M6 4.75A2.75 2.75 0 0 1 8.75 2h8.5A2.75 2.75 0 0 1 20 4.75v14.5A2.75 2.75 0 0 1 17.25 22h-8.5A2.75 2.75 0 0 1 6 19.25V4.75Z"/><path d="m9.5 13 2 2 3.5-4"/></svg>
+                        </span>
+                        <span><strong class="block text-sm font-bold text-slate-900">TaskHQ</strong></span>
+                    </div>
+                    <div class="mt-24 max-w-xs">
+                        <p class="text-sm font-medium text-blue-600">Your workspace, simplified</p>
+                        <h1 class="mt-3 text-3xl font-normal leading-tight tracking-[-0.02em] text-slate-900">Keep every task and team moving forward.</h1>
+                        <p class="mt-5 text-sm leading-6 text-slate-500">A calm, connected workspace for planning work, sharing updates, and staying on top of delivery.</p>
+                    </div>
+                    <div class="mt-20 space-y-4 text-sm text-slate-600">
+                        <div class="flex items-center gap-3"><span class="h-2 w-2 rounded-full bg-blue-600"></span><span>Organize work in one place</span></div>
+                        <div class="flex items-center gap-3"><span class="h-2 w-2 rounded-full bg-blue-600"></span><span>Keep teams aligned</span></div>
+                        <div class="flex items-center gap-3"><span class="h-2 w-2 rounded-full bg-blue-600"></span><span>See progress clearly</span></div>
+                    </div>
+                </section>
+
+                <section class="p-7 sm:p-10 lg:p-14">
+                    <div class="mb-8 lg:hidden">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5"><path d="M6 4.75A2.75 2.75 0 0 1 8.75 2h8.5A2.75 2.75 0 0 1 20 4.75v14.5A2.75 2.75 0 0 1 17.25 22h-8.5A2.75 2.75 0 0 1 6 19.25V4.75Z"/><path d="m9.5 13 2 2 3.5-4"/></svg>
+                                                        </span><span class="text-sm font-bold">TaskHQ</span>
+
+                        </div>
+                    </div>
+                    <div class="mb-8">
+                        <p class="text-sm font-medium text-slate-500">Welcome back</p>
+                        <h2 class="mt-2 text-3xl font-normal tracking-[-0.02em] text-slate-900">Sign in</h2>
+                        <p class="mt-3 text-sm leading-6 text-slate-500">Access your workspace and continue managing delivery.</p>
+                    </div>
+
+                <form method="POST" action="{{ url_for('login') }}" class="space-y-5">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+                    <div>
+                        <label class="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Username</label>
+                        <input type="text" name="username" required autocomplete="off" value=""
+                               class="w-full rounded-lg border border-[#dadce0] bg-white px-3.5 py-3 text-sm text-slate-800 outline-none transition focus:border-blue-600 focus:ring-1 focus:ring-blue-600" placeholder="Enter your username">
+                    </div>
+
+                    <div x-data="{ showPassword: false }">
+                        <label class="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Password</label>
+                        <div class="relative">
+                            <input :type="showPassword ? 'text' : 'password'" name="password" required autocomplete="current-password" value=""
+                                   class="w-full rounded-lg border border-[#dadce0] bg-white px-3.5 py-3 pr-12 text-sm text-slate-800 outline-none transition focus:border-blue-600 focus:ring-1 focus:ring-blue-600" placeholder="Enter your password">
+                            <button type="button" @click="showPassword = !showPassword" class="absolute inset-y-0 right-0 flex items-center px-4 text-slate-400 transition hover:text-blue-600">
+                                <svg x-show="!showPassword" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                                <svg x-show="showPassword" x-cloak class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+                        <span>Continue</span>
+                        <span aria-hidden="true">→</span>
+                    </button>
+                </form>
+
+                    <div class="mt-8 border-t border-[#e8eaed] pt-5 text-center text-xs text-slate-500">Secure access to your workspace</div>
+                </section>
+            </div>
+        </div>
+    </main>
+</body>
+</html>

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskHQ</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header style="background: #2c3e50; color: white; padding: 15px; text-align: left; display: flex; justify-content: space-between; align-items: center; padding-left: 30px; padding-right: 30px;">
+        <h2 style="margin: 0;">TaskHQ</h2>
+        <nav>
+            <a href="{{ url_for('index') }}" style="color: white; margin-right: 20px; text-decoration: none; font-weight: bold;">Home</a>
+            <a href="{{ url_for('tasks') }}" style="color: white; margin-right: 20px; text-decoration: none; font-weight: bold;">Tasks</a>
+            <a href="{{ url_for('users') }}" style="color: white; text-decoration: none; font-weight: bold;">Users</a>
+        </nav>
+    </header>
+
+    <main style="padding: 20px; max-width: 800px; margin: auto;">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div style="padding: 10px; margin-bottom: 15px; background-color: {% if category == 'success' %}#d4edda{% else %}#f8d7da{% endif %}; color: {% if category == 'success' %}#155724{% else %}#721c24{% endif %}; border-radius: 5px;">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
