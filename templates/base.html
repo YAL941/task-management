@@ -64,24 +64,6 @@
         </div>
     </header>
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-        <section class="flash-region" aria-label="Page notifications">
-            <div class="flash-stack">
-                {% for category, message in messages %}
-                <div class="flash-message {{ 'flash-success' if category == 'success' else 'flash-error' }}" role="alert">
-                    <div class="flash-copy">
-                        <span class="flash-label">{{ 'Success' if category == 'success' else 'Notice' }}</span>
-                        <p>{{ message }}</p>
-                    </div>
-                    <button class="flash-close" type="button" aria-label="Dismiss notification" title="Dismiss notification">&times;</button>
-                </div>
-                {% endfor %}
-            </div>
-        </section>
-        {% endif %}
-    {% endwith %}
-
     <div class="app-layout">
         <!-- طبقة التعتيم الخلفية عند فتح القائمة في الشاشات الصغيرة -->
         <div class="sidebar-backdrop" x-show="mobileNav" x-cloak @click="mobileNav = false" style="display: none;"></div>
@@ -220,6 +202,23 @@
         </aside>
 
         <main class="main-content">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                <section class="flash-region" aria-label="Page notifications">
+                    <div class="flash-stack">
+                        {% for category, message in messages %}
+                        <div class="flash-message {{ 'flash-success' if category == 'success' else 'flash-error' }}" role="alert">
+                            <div class="flash-copy">
+                                <span class="flash-label">{{ 'Success' if category == 'success' else 'Notice' }}</span>
+                                <p>{{ message }}</p>
+                            </div>
+                            <button class="flash-close" type="button" aria-label="Dismiss notification" title="Dismiss notification">&times;</button>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </section>
+                {% endif %}
+            {% endwith %}
             {% block content %}{% endblock %}
         </main>
     </div>

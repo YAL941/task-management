@@ -48,6 +48,23 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 db = SQLAlchemy(app)
 
+
+def verify_password(stored_password, raw_password):
+    if not stored_password or not raw_password:
+        return False
+    if stored_password == raw_password:
+        return True
+    if stored_password.startswith('scrypt:') or stored_password.startswith('pbkdf2:') or stored_password.startswith('sha256:') or stored_password.startswith('argon2'):
+        try:
+            return check_password_hash(stored_password, raw_password)
+        except ValueError:
+            return False
+    try:
+        return check_password_hash(stored_password, raw_password)
+    except ValueError:
+        return False
+
+
 VALID_ROLES = {"User", "Manager", "Admin"}
 VALID_STATUSES = {"Pending", "In Progress", "Completed", "Rejected"}
 VALID_PRIORITIES = {"Low", "Medium", "High"}
@@ -71,9 +88,17 @@ class User(db.Model):
     phone = db.Column(db.String(20))
     email = db.Column(db.String(255))
     gender = db.Column(db.String(10))
-    password_hash = db.Column(db.String(255), nullable=False)
+    password = db.Column("password_hash" if database_url and database_url.startswith("mssql") else "password", db.String(255), nullable=False)
     role = db.Column(db.String(20), nullable=False, default="User")
     created_at = db.Column(db.String(30))
+
+    @property
+    def password_hash(self):
+        return self.password
+
+    @password_hash.setter
+    def password_hash(self, value):
+        self.password = value
 
 
 class Task(db.Model):
@@ -658,7 +683,10 @@ def login():
         username = request.form.get("login_username", request.form.get("username", "")).strip().lower()
         user = User.query.filter(func.lower(func.trim(User.username)) == username).first()
         password = request.form.get("login_password", request.form.get("password", ""))
-        if user and check_password_hash(user.password_hash, password):
+        if user and verify_password(user.password_hash, password):
+            if user.password_hash == password:
+                user.password_hash = generate_password_hash(password)
+                db.session.commit()
             session.clear()
             session.update(user_id=user.id, username=user.username, role=user.role or "User")
             get_csrf_token()
@@ -827,6 +855,27 @@ def settings():
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
             return redirect(url_for("settings"))
+
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if current_password or new_password or confirm_password:
+            if not current_password or not new_password or not confirm_password:
+                flash("Please fill in the current password, new password, and confirmation.", "danger")
+                return redirect(url_for("settings"))
+            if not verify_password(user.password_hash, current_password):
+                flash("Current password is incorrect.", "danger")
+                return redirect(url_for("settings"))
+            if len(new_password) < 8:
+                flash("New password must be at least 8 characters long.", "danger")
+                return redirect(url_for("settings"))
+            if new_password != confirm_password:
+                flash("New password and confirmation do not match.", "danger")
+                return redirect(url_for("settings"))
+            user.password_hash = generate_password_hash(new_password)
+            flash("Password updated successfully.", "success")
+
         user.email = request.form.get("email", "").strip() or None
         for field in ("email_enabled", "task_created", "task_assigned", "status_changed", "due_reminders"):
             setattr(preferences, field, request.form.get(field) == "on")
@@ -1472,7 +1521,7 @@ def users():
         flash("User added successfully.", "success")
         return redirect(url_for("users", view=view))
 
-    users_query = db.session.execute(text("SELECT id, first_name, last_name, username, phone, gender, password_hash, role, created_at, email FROM users ORDER BY id ASC")).fetchall()
+    users_query = db.session.execute(text("SELECT id, first_name, last_name, username, phone, gender, NULL AS password, role, created_at, email FROM users ORDER BY id ASC")).fetchall()
     if view == "managers":
         users_query = [user for user in users_query if user[7] == "Manager"]
     elif view == "admins":
