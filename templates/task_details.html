@@ -40,7 +40,7 @@
 
       <div class="form-grid">
         <div class="form-label">Priority<div class="field">{{ task.priority }}</div></div>
-        <div class="form-label">Status<div class="field">{{ task.status }}</div></div>
+        <div class="form-label">Status<div class="field" data-realtime-task-status>{{ task.status }}</div></div>
         <div class="form-label">Due date<div class="field">{{ task.due_date or '-' }}</div></div>
         <div class="form-label">Completed at<div class="field">{{ task.completed_at or '-' }}</div></div>
       </div>
@@ -55,7 +55,7 @@
           <small>Only the recipient can complete or reject this task.</small>
         </div>
       </div>
-      <form :action="'/update_task_status/{{ task.id }}/' + statusAction" method="POST" style="display:grid; gap:12px;">
+      <form data-permission="tasks.change_status" :action="'/update_task_status/{{ task.id }}/' + statusAction" method="POST" style="display:grid; gap:12px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="form-label">Action<select class="field" name="status_choice" x-model="statusAction" required>
           <option value="">Choose an action</option>
@@ -81,9 +81,9 @@
         </div>
       </div>
       <div class="form-actions" style="justify-content:flex-start; padding:0 0 14px;">
-        <a href="{{ url_for('edit_task', id=task.id) }}" class="secondary-action">Edit task</a>
+        <a data-permission="tasks.edit" href="{{ url_for('edit_task', id=task.id) }}" class="secondary-action">Edit task</a>
       </div>
-      <form action="{{ url_for('delete_task', id=task.id) }}" method="POST" style="display:grid; gap:12px;">
+      <form data-permission="tasks.delete" action="{{ url_for('delete_task', id=task.id) }}" method="POST" style="display:grid; gap:12px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="form-label">Delete reason<textarea class="field" name="comment" required rows="3" placeholder="Add a reason before deleting..."></textarea></label>
         <button class="logout-link" type="submit" style="width:auto; border:1px solid #fecdd3; border-radius:9px; color:#b91c1c; background:#fff1f2;">Delete task</button>

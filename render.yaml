@@ -3,7 +3,7 @@ services:
     name: taskhq
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT main:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --worker-class gthread --threads 100 --workers 1 main:app
     envVars:
       - key: DATABASE_URL
         fromDatabase:

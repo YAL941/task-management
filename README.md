@@ -12,6 +12,19 @@ A Flask-based task management system with role-based access, notifications, team
 - Data import/export (CSV / Excel / PDF)
 - AI assistant with mock and provider-backed modes
 
+## Granular RBAC
+
+The application now resolves access through normalized `roles`, `permissions`,
+`role_permissions`, and `user_roles` tables. Existing `User.role` values are
+kept as a compatibility layer and are seeded into the matching system role.
+
+Permissions are checked in the backend with `has_permission(user, key,
+resource)`. Resource checks support `OWN`, `TEAM`, and `ANY` scopes. The role
+management screen is available at `/roles` for users with `roles.view`, and
+the current user's effective grants are available at `/api/me/permissions`.
+Role changes are audited and publish `PERMISSIONS_UPDATED` over the existing
+Socket.IO connection.
+
 ## Quick start
 
 1. Create and activate a virtual environment

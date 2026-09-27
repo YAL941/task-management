@@ -1,4 +1,118 @@
 document.addEventListener('DOMContentLoaded', () => {
+    const realtimeStatus = document.querySelector('[data-realtime-status]');
+    const realtimeLabel = realtimeStatus?.querySelector('[data-realtime-status-label]');
+    const realtimeDetail = realtimeStatus?.querySelector('[data-realtime-status-detail]');
+    const realtime = {
+        socket: null,
+        seen: new Set(),
+        sequence: Number(sessionStorage.getItem('taskhq:last-event-sequence') || 0),
+        setStatus(status, label, detail) {
+            if (!realtimeStatus) return;
+            realtimeStatus.dataset.realtimeStatus = status;
+            if (realtimeLabel) realtimeLabel.textContent = label;
+            if (realtimeDetail) realtimeDetail.textContent = detail;
+        },
+        handleEvent(event) {
+            if (!event?.eventId || realtime.seen.has(event.eventId)) return;
+            realtime.seen.add(event.eventId);
+            realtime.sequence = Math.max(realtime.sequence, Number(event.sequence || 0));
+            sessionStorage.setItem('taskhq:last-event-sequence', String(realtime.sequence));
+            window.dispatchEvent(new CustomEvent('taskhq:realtime', { detail: event }));
+            if (event.eventType === 'NOTIFICATION_CREATED' || event.entityType === 'notification') {
+                document.dispatchEvent(new Event('taskhq:refresh-notifications'));
+            }
+        },
+        async connect() {
+            if (!window.io || !realtimeStatus) return;
+            try {
+                const response = await fetch('/api/realtime/token', { credentials: 'same-origin', cache: 'no-store' });
+                if (!response.ok) return;
+                const { token } = await response.json();
+                realtime.socket = window.io({ auth: { token }, transports: ['websocket', 'polling'], reconnection: true });
+                realtime.socket.on('connect', () => {
+                    realtime.setStatus('online', 'Live', 'Connected securely');
+                    realtime.socket.emit('sync', { lastEventId: realtime.sequence }, (result) => {
+                        if (result?.ok) result.events.forEach((event) => realtime.handleEvent(event));
+                    });
+                    const taskMatch = window.location.pathname.match(/\/tasks\/(\d+)\/view/);
+                    const teamMatch = window.location.pathname.match(/\/teams\/(\d+)$/);
+                    if (taskMatch) realtime.socket.emit('join_room', { room: `task:${taskMatch[1]}` });
+                    if (teamMatch) realtime.socket.emit('join_room', { room: `team:${teamMatch[1]}` });
+                });
+                realtime.socket.on('reconnect_attempt', () => realtime.setStatus('reconnecting', 'Reconnecting...', 'Restoring live updates'));
+                realtime.socket.on('disconnect', () => realtime.setStatus('offline', 'Offline', 'Live updates paused'));
+                realtime.socket.on('connect_error', () => realtime.setStatus('reconnecting', 'Reconnecting...', 'Retrying secure connection'));
+                realtime.socket.on('realtime_event', (event) => realtime.handleEvent(event));
+                realtime.socket.on('presence', (event) => window.dispatchEvent(new CustomEvent('taskhq:presence', { detail: event })));
+                window.setInterval(() => realtime.socket?.connected && realtime.socket.emit('heartbeat'), 25000);
+            } catch (error) {
+                realtime.setStatus('offline', 'Offline', 'Live updates unavailable');
+                console.error('Realtime connection failed', error);
+            }
+        },
+        async loadPermissions() {
+            try {
+                const response = await fetch('/api/me/permissions', { credentials: 'same-origin', cache: 'no-store' });
+                if (!response.ok) return;
+                const result = await response.json();
+                const allowed = new Set(result.permissions.map((permission) => permission.key));
+                document.querySelectorAll('[data-permission]').forEach((element) => {
+                    const permission = element.dataset.permission;
+                    const action = permission.split('.').pop();
+                    const scoped = action === 'edit' || action === 'delete' || action === 'assign';
+                    element.hidden = !allowed.has(permission) && !(scoped && (allowed.has(`${permission}_own`) || allowed.has(`${permission}_any`)));
+                });
+            } catch (error) {
+                console.error('Could not load permissions', error);
+            }
+        },
+    };
+    window.TaskHQRealtime = realtime;
+    realtime.connect();
+    realtime.loadPermissions();
+
+    window.addEventListener('taskhq:realtime', ({ detail: event }) => {
+        if (event.entityType === 'task' && event.entityId) {
+            const taskId = String(event.entityId);
+            const row = document.querySelector(`[data-task-id="${taskId}"]`);
+            const status = event.payload?.newStatus;
+            if (row && status) {
+                row.dataset.taskStatus = status;
+                row.querySelector('[data-realtime-task-status]')?.replaceChildren(document.createTextNode(status));
+            }
+            if (event.eventType === 'TASK_DELETED') row?.remove();
+        }
+
+        if (event.eventType === 'PERMISSIONS_UPDATED' && Number(event.entityId) === Number(document.body.dataset.userId)) {
+            realtime.loadPermissions();
+        }
+
+        if (event.eventType === 'COMMENT_CREATED' && event.entityType === 'team') {
+            const messageList = document.querySelector('[data-team-chat-messages]');
+            const messageId = String(event.payload?.messageId || '');
+            if (!messageList || messageList.querySelector(`[data-team-chat-message-id="${messageId}"]`)) return;
+            document.querySelector('#team-chat-empty')?.remove();
+            const message = document.createElement('div');
+            message.dataset.teamChatMessage = '';
+            message.dataset.teamChatMessageId = messageId;
+            message.style.cssText = 'padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;';
+            const header = document.createElement('div');
+            header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;';
+            const author = document.createElement('strong');
+            author.style.cssText = 'font-size:13px;';
+            author.textContent = event.payload?.username || 'User';
+            const timestamp = document.createElement('small');
+            timestamp.style.cssText = 'color:var(--muted); font-size:10px;';
+            timestamp.textContent = event.timestamp || '';
+            header.append(author, timestamp);
+            const body = document.createElement('p');
+            body.style.cssText = 'margin:0; color:var(--ink); line-height:1.6;';
+            body.textContent = event.payload?.body || '';
+            message.append(header, body);
+            messageList.append(message);
+        }
+    });
+
     document.querySelectorAll('[data-password-toggle]').forEach((button) => {
         button.addEventListener('click', () => {
             const input = document.getElementById(button.dataset.passwordToggle);
@@ -106,11 +220,21 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshNotifications();
         window.setInterval(refreshNotifications, 5000);
         document.addEventListener('visibilitychange', refreshNotifications);
+        document.addEventListener('taskhq:refresh-notifications', refreshNotifications);
     }
 
     document.querySelectorAll('[data-confirm]').forEach((form) => {
         form.addEventListener('submit', (event) => {
             if (!window.confirm(form.dataset.confirm)) event.preventDefault();
+        });
+    });
+
+    document.querySelectorAll('[data-select-group]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const form = button.closest('[data-role-form]');
+            form?.querySelectorAll(`[data-permission-group="${button.dataset.selectGroup}"]`).forEach((checkbox) => {
+                checkbox.checked = true;
+            });
         });
     });
 
@@ -144,6 +268,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.querySelector('#team-chat-empty')?.remove();
                 const message = document.createElement('div');
                 message.dataset.teamChatMessage = '';
+                message.dataset.teamChatMessageId = String(result.message.id);
                 message.style.cssText = 'padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;';
                 const header = document.createElement('div');
                 header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;';

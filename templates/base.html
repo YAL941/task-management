@@ -15,7 +15,7 @@
 
     {% block head %}{% endblock %}
 </head>
-<body class="app-shell" x-data="{ mobileNav: false }">
+<body class="app-shell" data-user-id="{{ session.get('user_id', '') }}" x-data="{ mobileNav: false }">
     <div class="app-noise" aria-hidden="true"></div>
     <header class="topbar">
         <div class="topbar-inner">
@@ -118,7 +118,7 @@
                 </div>
 
                 <!-- باقي القوائم -->
-                {% if session.get('role') == 'Admin' %}
+                {% if can('users.view') or session.get('role') == 'Admin' %}
                 <div x-data="{ usersOpen: {{ 'true' if request.endpoint == 'users' else 'false' }} }" @click.outside="usersOpen = false" class="space-y-1">
                     <div @click.stop="usersOpen = !usersOpen" class="nav-item flex items-center justify-between cursor-pointer {% if request.endpoint == 'users' %}active{% endif %}">
                         <div class="flex items-center space-x-2">
@@ -144,6 +144,8 @@
                     </div>
                 </div>
                 {% endif %}
+
+                {% if can('roles.view') %}<a href="{{ url_for('roles') }}" class="nav-item {% if request.endpoint == 'roles' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 5 6v5c0 4.5 2.9 8.4 7 10 4.1-1.6 7-5.5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg><span>Roles & permissions</span></a>{% endif %}
 
                 <div x-data="{ reportsOpen: {{ 'true' if request.endpoint in ['reports', 'analytics'] else 'false' }} }" @click.outside="reportsOpen = false" class="space-y-1">
                     <div @click.stop="reportsOpen = !reportsOpen" class="nav-item flex items-center justify-between cursor-pointer {% if request.endpoint in ['reports', 'analytics'] %}active{% endif %}">
@@ -192,11 +194,12 @@
                         <a href="{{ url_for('open_team_workspace') }}" class="flex items-center px-3 py-2 text-xs font-medium text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors {% if request.endpoint == 'team_detail' %}text-blue-600 bg-blue-50{% endif %}"><span>Workspace</span></a>
                     </div>
                 </div>
-                {% if session.get('role') == 'Admin' %}<a href="{{ url_for('automation') }}" class="nav-item {% if request.endpoint == 'automation' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></svg><span>Automation</span></a><a href="{{ url_for('audit_logs') }}" class="nav-item {% if request.endpoint == 'audit_logs' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Audit logs</span></a>{% endif %}
-                {% if session.get('role') == 'Admin' %}<a href="{{ url_for('data_center') }}" class="nav-item {% if request.endpoint == 'data_center' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg><span>Import / Export</span></a>{% endif %}
+                {% if can('permissions.manage') %}<a href="{{ url_for('automation') }}" class="nav-item {% if request.endpoint == 'automation' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></svg><span>Automation</span></a>{% endif %}
+                {% if can('audit_logs.view') %}<a href="{{ url_for('audit_logs') }}" class="nav-item {% if request.endpoint == 'audit_logs' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Audit logs</span></a>{% endif %}
+                {% if can('permissions.manage') %}<a href="{{ url_for('data_center') }}" class="nav-item {% if request.endpoint == 'data_center' %}active{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg><span>Import / Export</span></a>{% endif %}
             </nav>
             <div class="sidebar-spacer"></div>
-            <div class="sidebar-status"><span class="status-pulse"></span><div><strong>System online</strong><small>All services operational</small></div></div>
+            <div class="sidebar-status" data-realtime-status="offline"><span class="status-pulse"></span><div><strong data-realtime-status-label>Live unavailable</strong><small data-realtime-status-detail>Connecting securely...</small></div></div>
                         <div class="sidebar-footer">TaskHQ <span>v2.1</span></div>
 
         </aside>
@@ -222,6 +225,7 @@
             {% block content %}{% endblock %}
         </main>
     </div>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>

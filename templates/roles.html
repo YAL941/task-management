@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Roles & Permissions - TaskHQ{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div><p class="eyebrow">Access control</p><h1>Roles & permissions</h1><p class="page-subtitle">Define exactly what each role can do and where it applies.</p></div>
+</div>
+
+<section class="card-surface settings-card" style="max-width:1160px; margin:0 auto 16px;">
+  <div class="form-section-title"><span class="form-number">01</span><div><strong>Create a role</strong><small>Custom roles inherit no permissions until you select them.</small></div></div>
+  <form method="POST" style="display:grid; gap:12px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create">
+    <div class="form-grid"><label class="form-label">Role name<input class="field" name="name" maxlength="80" required placeholder="e.g. Reviewer"></label><label class="form-label">Description<input class="field" name="description" maxlength="255" placeholder="What this role is for"></label></div>
+    <div class="form-actions" style="justify-content:flex-end;"><button class="primary-action" type="submit">Create role <span>→</span></button></div>
+  </form>
+</section>
+
+{% for item in role_rows %}
+<section class="card-surface settings-card" style="max-width:1160px; margin:16px auto;">
+  <form method="POST" data-role-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="save"><input type="hidden" name="role_id" value="{{ item.role.id }}">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:18px;">
+      <div><div class="form-section-title" style="margin-bottom:4px;"><span class="form-number">02</span><div><strong>{{ item.role.name }}</strong><small>{{ item.role.description or 'No description.' }}{% if item.role.is_system %} · System role{% endif %}</small></div></div></div>
+      {% if not item.role.is_system %}<button class="logout-link" type="submit" formaction="{{ url_for('roles') }}" name="action" value="delete" data-confirm="Delete this role?">Delete role</button>{% endif %}
+    </div>
+    <input class="field" name="description" value="{{ item.role.description or '' }}" maxlength="255" aria-label="Role description">
+    <div style="display:grid; gap:16px; margin-top:18px;">
+      {% for group, permissions in permission_catalog.items() %}
+      {% set group_index = loop.index %}
+      <div style="border:1px solid #edf2f7; border-radius:10px; padding:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><strong>{{ group }}</strong><button type="button" class="secondary-action" data-select-group="{{ group_index }}" style="padding:6px 10px;">Select group</button></div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:8px;">
+          {% for key, label in permissions.items() %}
+          <label style="display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center; padding:8px 10px; border:1px solid #e5eaf1; border-radius:8px; font-size:11px;">
+            <input type="checkbox" name="permission_{{ key }}" {% if key in item.permissions %}checked{% endif %} data-permission-group="{{ group_index }}">
+            <span>{{ label }}<small style="display:block; color:var(--muted);">{{ key }}</small></span>
+            <select name="scope_{{ key }}" class="field" style="width:88px; padding:5px; font-size:10px;">
+              {% for scope in scopes %}<option value="{{ scope }}" {% if item.permissions.get(key, 'ANY') == scope %}selected{% endif %}>{{ scope }}</option>{% endfor %}
+            </select>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="form-actions" style="justify-content:flex-end; margin-top:18px;"><button class="primary-action" type="submit">Save permissions <span>→</span></button></div>
+  </form>
+</section>
+{% endfor %}
+{% endblock %}

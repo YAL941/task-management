@@ -6,7 +6,8 @@ import csv
 import io
 import smtplib
 import ssl
-from datetime import date, datetime
+import uuid
+from datetime import date, datetime, timezone
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
@@ -14,6 +15,8 @@ from urllib.request import Request as UrlRequest, urlopen
 
 from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
+from flask_socketio import SocketIO, emit, join_room, leave_room
+import jwt
 from sqlalchemy import func, inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -47,6 +50,8 @@ app.config["SQLALCHEMY_DATABASE_URI"] = database_url or f"sqlite:///{default_dat
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 db = SQLAlchemy(app)
+socketio = SocketIO(app, cors_allowed_origins=None, async_mode="threading", manage_session=False)
+realtime_connections = {}
 
 
 def verify_password(stored_password, raw_password):
@@ -69,6 +74,27 @@ VALID_ROLES = {"User", "Manager", "Admin"}
 VALID_STATUSES = {"Pending", "In Progress", "Completed", "Rejected"}
 VALID_PRIORITIES = {"Low", "Medium", "High"}
 VALID_DEPENDENCY_TYPES = {"Blocks", "Blocked By", "Related To"}
+PERMISSION_SCOPES = {"OWN", "TEAM", "ANY"}
+PERMISSION_CATALOG = {
+    "Tasks": {
+        "tasks.view": "View tasks", "tasks.create": "Create tasks", "tasks.edit": "Edit tasks",
+        "tasks.delete": "Delete tasks", "tasks.assign": "Assign tasks", "tasks.reassign": "Reassign tasks",
+        "tasks.change_status": "Change task status", "tasks.change_priority": "Change task priority",
+        "tasks.change_due_date": "Change due date", "tasks.cancel": "Cancel tasks", "tasks.restore": "Restore tasks",
+        "tasks.archive": "Archive tasks", "tasks.export": "Export tasks", "tasks.edit_own": "Edit own tasks",
+        "tasks.delete_own": "Delete own tasks", "tasks.assign_own": "Assign own tasks",
+    },
+    "Users": {"users.view": "View users", "users.create": "Create users", "users.edit": "Edit users", "users.delete": "Delete users", "users.activate": "Activate users", "users.deactivate": "Deactivate users", "users.reset_password": "Reset passwords"},
+    "Roles": {"roles.view": "View roles", "roles.create": "Create roles", "roles.edit": "Edit roles", "roles.delete": "Delete roles", "roles.assign": "Assign roles"},
+    "Permissions": {"permissions.view": "View permissions", "permissions.manage": "Manage permissions"},
+    "Comments": {"comments.view": "View comments", "comments.create": "Create comments", "comments.edit": "Edit comments", "comments.delete": "Delete comments"},
+    "Attachments": {"attachments.view": "View attachments", "attachments.upload": "Upload attachments", "attachments.delete": "Delete attachments"},
+    "Notifications": {"notifications.view": "View notifications", "notifications.manage": "Manage notifications"},
+    "Reports": {"reports.view": "View reports", "reports.create": "Create reports", "reports.export": "Export reports"},
+    "Audit Logs": {"audit_logs.view": "View audit logs", "audit_logs.export": "Export audit logs"},
+    "Settings": {"settings.view": "View settings", "settings.edit": "Edit settings"},
+}
+ALL_PERMISSIONS = {permission for group in PERMISSION_CATALOG.values() for permission in group}
 TEAM_PERMISSION_OPTIONS = (
     ("view_tasks", "View team tasks"),
     ("create_tasks", "Create and assign tasks"),
@@ -99,6 +125,42 @@ class User(db.Model):
     @password_hash.setter
     def password_hash(self, value):
         self.password = value
+
+
+class Role(db.Model):
+    __tablename__ = "roles"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(80), unique=True, nullable=False)
+    description = db.Column(db.String(255))
+    is_system = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.String(30), nullable=False)
+
+
+class Permission(db.Model):
+    __tablename__ = "permissions"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    key = db.Column(db.String(100), unique=True, nullable=False)
+    group_name = db.Column(db.String(80), nullable=False)
+    label = db.Column(db.String(120), nullable=False)
+
+
+class RolePermission(db.Model):
+    __tablename__ = "role_permissions"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    role_id = db.Column(db.Integer, db.ForeignKey("roles.id"), nullable=False)
+    permission_id = db.Column(db.Integer, db.ForeignKey("permissions.id"), nullable=False)
+    scope = db.Column(db.String(10), nullable=False, default="ANY")
+    __table_args__ = (db.UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),)
+
+
+class UserRole(db.Model):
+    __tablename__ = "user_roles"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    role_id = db.Column(db.Integer, db.ForeignKey("roles.id"), nullable=False)
+    assigned_by = db.Column(db.Integer, db.ForeignKey("users.id"))
+    created_at = db.Column(db.String(30), nullable=False)
+    __table_args__ = (db.UniqueConstraint("user_id", "role_id", name="uq_user_role"),)
 
 
 class Task(db.Model):
@@ -245,6 +307,26 @@ class Comment(db.Model):
     created_at = db.Column(db.String(30), nullable=False)
 
 
+class RealtimeEvent(db.Model):
+    __tablename__ = "realtime_events"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    event_id = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    event_type = db.Column(db.String(80), nullable=False, index=True)
+    actor_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    entity_type = db.Column(db.String(40), nullable=False)
+    entity_id = db.Column(db.Integer)
+    payload = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.String(30), nullable=False, index=True)
+
+
+class UserPresence(db.Model):
+    __tablename__ = "user_presence"
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), primary_key=True)
+    status = db.Column(db.String(20), nullable=False, default="offline")
+    last_seen_at = db.Column(db.String(30), nullable=False)
+    updated_at = db.Column(db.String(30), nullable=False)
+
+
 class AutomationRule(db.Model):
     __tablename__ = "automation_rules"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -256,6 +338,131 @@ class AutomationRule(db.Model):
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.String(30), nullable=False)
+
+
+ROLE_DEFAULTS = {
+    "Super Admin": (ALL_PERMISSIONS, "ANY"),
+    "Admin": (ALL_PERMISSIONS, "ANY"),
+    "Manager": ({
+        "tasks.view", "tasks.create", "tasks.edit", "tasks.assign", "tasks.reassign", "tasks.change_status",
+        "tasks.change_priority", "tasks.change_due_date", "comments.view", "comments.create", "reports.view",
+        "reports.export", "notifications.view", "settings.view", "settings.edit", "users.view",
+    }, "TEAM"),
+    "User": ({"tasks.view", "tasks.create", "tasks.change_status", "tasks.edit_own", "tasks.assign_own", "comments.view", "comments.create", "notifications.view", "settings.view", "settings.edit"}, "OWN"),
+}
+
+
+def seed_rbac():
+    now = datetime.now().isoformat(timespec="seconds")
+    permissions = {}
+    for group_name, entries in PERMISSION_CATALOG.items():
+        for key, label in entries.items():
+            permission = Permission.query.filter_by(key=key).first()
+            if not permission:
+                permission = Permission(key=key, group_name=group_name, label=label)
+                db.session.add(permission)
+            permissions[key] = permission
+    db.session.flush()
+    roles = {}
+    for name in ROLE_DEFAULTS:
+        role = Role.query.filter_by(name=name).first()
+        if not role:
+            role = Role(name=name, description=f"System role: {name}", is_system=True, created_at=now)
+            db.session.add(role)
+        roles[name] = role
+    db.session.flush()
+    for name, (permission_keys, default_scope) in ROLE_DEFAULTS.items():
+        role = roles[name]
+        existing = {row.permission_id: row for row in RolePermission.query.filter_by(role_id=role.id).all()}
+        for key in permission_keys:
+            permission = permissions[key]
+            row = existing.get(permission.id)
+            if not row:
+                scope = "TEAM" if name == "User" and key in {"tasks.view", "comments.view"} else default_scope
+                db.session.add(RolePermission(role_id=role.id, permission_id=permission.id, scope=scope))
+            elif name == "User" and key in {"tasks.view", "comments.view"} and row.scope == "OWN":
+                row.scope = "TEAM"
+    db.session.flush()
+    for user in User.query.all():
+        role = roles.get(user.role or "User")
+        if role and not UserRole.query.filter_by(user_id=user.id, role_id=role.id).first():
+            db.session.add(UserRole(user_id=user.id, role_id=role.id, assigned_by=user.id, created_at=now))
+    db.session.commit()
+
+
+def user_roles(user):
+    if isinstance(user, int):
+        user = db.session.get(User, user)
+    if not user:
+        return []
+    assigned = list(db.session.query(Role).join(UserRole, UserRole.role_id == Role.id).filter(UserRole.user_id == user.id).all())
+    if user.role and not any(role.name == user.role for role in assigned):
+        legacy = Role.query.filter_by(name=user.role).first()
+        if legacy:
+            assigned.append(legacy)
+    return assigned
+
+
+def permission_explanations(user, permission):
+    grants = []
+    for role in user_roles(user):
+        rows = db.session.query(RolePermission, Permission).join(Permission, Permission.id == RolePermission.permission_id).filter(RolePermission.role_id == role.id, Permission.key == permission).all()
+        grants.extend({"role": role.name, "scope": row.scope} for row, _permission in rows)
+    return grants
+
+
+def has_permission(user, permission, resource=None, requested_scope=None):
+    if isinstance(user, int):
+        user = db.session.get(User, user)
+    if not user:
+        return False
+    grants = permission_explanations(user, permission)
+    if permission.endswith(".edit") or permission.endswith(".delete") or permission.endswith(".assign"):
+        action = permission.rsplit(".", 1)[1]
+        if resource is not None:
+            owner = getattr(resource, "creator_id", None) == user.id or getattr(resource, "user_id", None) == user.id
+            team = bool(getattr(resource, "team_id", None) and TeamMember.query.filter_by(team_id=resource.team_id, user_id=user.id).first())
+            if owner:
+                grants.extend(permission_explanations(user, f"{permission}_own"))
+            if not owner and not team:
+                grants = [grant for grant in grants if grant["scope"] == "ANY"]
+        grants.extend(permission_explanations(user, f"{permission}_{action}"))
+    if not grants:
+        return False
+    if requested_scope:
+        return any(grant["scope"] == requested_scope or grant["scope"] == "ANY" for grant in grants)
+    if resource is None:
+        return True
+    if any(grant["scope"] == "ANY" for grant in grants):
+        return True
+    owner = getattr(resource, "creator_id", None) == user.id or getattr(resource, "user_id", None) == user.id
+    team = bool(getattr(resource, "team_id", None) and TeamMember.query.filter_by(team_id=resource.team_id, user_id=user.id).first())
+    return any(grant["scope"] == "OWN" and owner or grant["scope"] == "TEAM" and team for grant in grants)
+
+
+def can(permission, resource=None):
+    return has_permission(session.get("user_id"), permission, resource)
+
+
+def is_super_admin(user_id):
+    return any(role.name == "Super Admin" for role in user_roles(user_id))
+
+
+def sync_user_roles(user, role_ids, actor_id):
+    if not has_permission(actor_id, "roles.assign"):
+        return False, "You do not have permission to assign roles."
+    selected_roles = Role.query.filter(Role.id.in_(role_ids)).all() if role_ids else []
+    if not selected_roles:
+        return False, "Select at least one role."
+    if any(role.name == "Super Admin" for role in selected_roles) and not is_super_admin(actor_id):
+        return False, "Only a Super Admin can assign the Super Admin role."
+    UserRole.query.filter_by(user_id=user.id).delete()
+    now = datetime.now().isoformat(timespec="seconds")
+    for role in selected_roles:
+        db.session.add(UserRole(user_id=user.id, role_id=role.id, assigned_by=actor_id, created_at=now))
+    legacy_role = next((role.name for role in selected_roles if role.name in VALID_ROLES), "User")
+    user.role = legacy_role
+    return True, None
 
 
 def notify_team_live_meeting(team, meeting):
@@ -377,6 +584,7 @@ with app.app_context():
                 created_at=datetime.now().isoformat(timespec="minutes"),
             ))
     db.session.flush()
+    seed_rbac()
     reconcile_live_meetings()
 
 
@@ -389,6 +597,169 @@ def get_csrf_token():
 def valid_csrf():
     submitted = request.form.get("csrf_token", "") or request.headers.get("X-CSRF-Token", "")
     return secrets.compare_digest(session.get("csrf_token", ""), submitted)
+
+
+def realtime_token(user_id):
+    now = int(datetime.now(timezone.utc).timestamp())
+    return jwt.encode(
+        {"sub": str(user_id), "iat": now, "exp": now + 3600},
+        app.secret_key,
+        algorithm="HS256",
+    )
+
+
+def realtime_event(event_type, actor_id, entity_type, entity_id=None, payload=None, rooms=None):
+    """Persist an event before publishing it so reconnect sync has a durable source."""
+    created_at = datetime.now().isoformat(timespec="seconds")
+    event = RealtimeEvent(
+        event_id=uuid.uuid4().hex,
+        event_type=event_type,
+        actor_id=actor_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=json.dumps(payload or {}, default=str),
+        created_at=created_at,
+    )
+    db.session.add(event)
+    db.session.flush()
+    message = {
+        "sequence": event.id,
+        "eventId": event.event_id,
+        "eventType": event.event_type,
+        "timestamp": event.created_at,
+        "userId": event.actor_id,
+        "entityType": event.entity_type,
+        "entityId": event.entity_id,
+        "payload": payload or {},
+    }
+    return message, rooms or []
+
+
+def publish_realtime(message, rooms):
+    for room in rooms:
+        socketio.emit("realtime_event", message, to=room)
+
+
+def record_realtime_event(event_type, actor_id, entity_type, entity_id=None, payload=None, rooms=None):
+    message, target_rooms = realtime_event(event_type, actor_id, entity_type, entity_id, payload, rooms)
+    db.session.commit()
+    publish_realtime(message, target_rooms)
+
+
+def can_access_task(user_id, task):
+    if not task:
+        return False
+    user = db.session.get(User, user_id)
+    if user and user.role == "Admin":
+        return True
+    team_member = TeamMember.query.filter_by(team_id=task.team_id, user_id=user_id).first() if task.team_id else None
+    return bool(task.user_id == user_id or task.creator_id == user_id or team_member)
+
+
+@app.route("/api/realtime/token")
+def realtime_auth_token():
+    if not session.get("user_id"):
+        return {"ok": False, "error": "Unauthorized"}, 401
+    return {"token": realtime_token(session["user_id"]), "user_id": session["user_id"]}
+
+
+@socketio.on("connect")
+def realtime_connect(auth=None):
+    auth = auth or {}
+    token = auth.get("token")
+    if not token:
+        return False
+    try:
+        claims = jwt.decode(token, app.secret_key, algorithms=["HS256"])
+        user_id = int(claims["sub"])
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        return False
+    user = db.session.get(User, user_id)
+    if not user:
+        return False
+    realtime_connections[request.sid] = user_id
+    join_room("global")
+    join_room(f"user:{user_id}")
+    now = datetime.now().isoformat(timespec="seconds")
+    presence = db.session.get(UserPresence, user_id) or UserPresence(user_id=user_id, last_seen_at=now, updated_at=now)
+    presence.status = "online"
+    presence.last_seen_at = now
+    presence.updated_at = now
+    db.session.add(presence)
+    db.session.commit()
+    socketio.emit("presence", {"eventType": "USER_ONLINE", "userId": user_id, "status": "online", "timestamp": now}, to="global")
+    emit("connected", {"userId": user_id, "serverTime": now})
+
+
+@socketio.on("heartbeat")
+def realtime_heartbeat():
+    user_id = realtime_connections.get(request.sid)
+    if not user_id:
+        return {"ok": False, "error": "Unauthorized"}
+    now = datetime.now().isoformat(timespec="seconds")
+    presence = db.session.get(UserPresence, user_id)
+    if presence:
+        presence.status = "online"
+        presence.last_seen_at = now
+        presence.updated_at = now
+        db.session.commit()
+    return {"ok": True, "timestamp": now}
+
+
+@socketio.on("join_room")
+def realtime_join_room(data):
+    user_id = realtime_connections.get(request.sid)
+    room = (data or {}).get("room", "")
+    if not user_id or not isinstance(room, str):
+        return {"ok": False, "error": "Unauthorized"}
+    parts = room.split(":", 1)
+    allowed = room == "global"
+    if len(parts) == 2 and parts[0] == "user":
+        allowed = int(parts[1]) == user_id if parts[1].isdigit() else False
+    elif len(parts) == 2 and parts[0] == "task" and parts[1].isdigit():
+        allowed = can_access_task(user_id, db.session.get(Task, int(parts[1])))
+    elif len(parts) == 2 and parts[0] == "team" and parts[1].isdigit():
+        team = db.session.get(Team, int(parts[1]))
+        allowed = bool(team and (db.session.get(User, user_id).role in {"Admin", "Manager"} or TeamMember.query.filter_by(team_id=team.id, user_id=user_id).first()))
+    if not allowed:
+        return {"ok": False, "error": "Room access denied"}
+    join_room(room)
+    return {"ok": True, "room": room}
+
+
+@socketio.on("sync")
+def realtime_sync(data):
+    user_id = realtime_connections.get(request.sid)
+    if not user_id:
+        return {"ok": False, "error": "Unauthorized"}
+    since_id = int((data or {}).get("lastEventId", 0) or 0)
+    events = RealtimeEvent.query.filter(RealtimeEvent.id > since_id).order_by(RealtimeEvent.id.asc()).limit(200).all()
+    result = []
+    for event in events:
+        payload = json.loads(event.payload or "{}")
+        if event.entity_type == "task" and not can_access_task(user_id, db.session.get(Task, event.entity_id)) and user_id not in payload.get("recipientIds", []):
+            continue
+        if event.entity_type == "team":
+            team = db.session.get(Team, event.entity_id)
+            if not team or (db.session.get(User, user_id).role not in {"Admin", "Manager"} and not TeamMember.query.filter_by(team_id=team.id, user_id=user_id).first()):
+                continue
+        result.append({"sequence": event.id, "eventId": event.event_id, "eventType": event.event_type, "timestamp": event.created_at, "userId": event.actor_id, "entityType": event.entity_type, "entityId": event.entity_id, "payload": payload})
+    return {"ok": True, "events": result, "lastEventId": events[-1].id if events else since_id}
+
+
+@socketio.on("disconnect")
+def realtime_disconnect():
+    user_id = realtime_connections.pop(request.sid, None)
+    if not user_id:
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    presence = db.session.get(UserPresence, user_id)
+    if presence:
+        presence.status = "offline"
+        presence.last_seen_at = now
+        presence.updated_at = now
+        db.session.commit()
+    socketio.emit("presence", {"eventType": "USER_OFFLINE", "userId": user_id, "status": "offline", "timestamp": now}, to="global")
 
 
 def write_audit(action, entity, entity_id=None, old_value=None, new_value=None):
@@ -435,7 +806,7 @@ def validate_import_rows(resource, rows):
 @app.context_processor
 def inject_template_data():
     current_user = User.query.get(session["user_id"]) if session.get("user_id") else None
-    return {"current_user": current_user, "csrf_token": get_csrf_token()}
+    return {"current_user": current_user, "csrf_token": get_csrf_token(), "can": can}
 
 
 @app.after_request
@@ -459,11 +830,22 @@ def login_required(view):
     return wrapped_view
 
 
+def permission_required(permission, resource=None):
+    user_id = session.get("user_id")
+    target = resource() if callable(resource) else resource
+    if not has_permission(user_id, permission, target):
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.is_json:
+            return {"ok": False, "error": "You are not authorized for this action.", "permission": permission}, 403
+        flash("You do not have permission to perform this action.", "danger")
+        return redirect(url_for("tasks"))
+    return None
+
+
 def admin_required(view):
     @wraps(view)
     @login_required
     def wrapped_view(*args, **kwargs):
-        if session.get("role") != "Admin":
+        if not has_permission(session.get("user_id"), "permissions.manage"):
             flash("Administrator permission is required.", "danger")
             return redirect(url_for("tasks"))
         return view(*args, **kwargs)
@@ -787,7 +1169,7 @@ def open_notification(notification_id):
 def task_view(task_id):
     task = db.session.get(Task, task_id)
     member_team_ids = {team_id for (team_id,) in db.session.query(TeamMember.team_id).filter_by(user_id=session["user_id"]).all()}
-    if not task or (session.get("role") != "Admin" and task.user_id != session["user_id"] and task.creator_id != session["user_id"] and task.team_id not in member_team_ids):
+    if not task or not has_permission(session["user_id"], "tasks.view", task) or (not can_access_task(session["user_id"], task) and task.team_id not in member_team_ids):
         flash("You do not have access to this task.", "danger")
         return redirect(url_for("tasks"))
     detail = Detail.query.filter_by(task_id=task.id).first()
@@ -799,8 +1181,8 @@ def task_view(task_id):
         detail=detail,
         comments=comments,
         users=users,
-        can_change_status=session.get("role") == "Admin" or (task.user_id == session["user_id"] and task.creator_id != session["user_id"]),
-        can_manage_task=session.get("role") == "Admin" or task.creator_id == session["user_id"],
+        can_change_status=has_permission(session["user_id"], "tasks.change_status", task),
+        can_manage_task=has_permission(session["user_id"], "tasks.edit", task),
         notifications=get_shared_data()[0],
         unread_count=get_shared_data()[1],
     )
@@ -849,9 +1231,15 @@ def api_ai_ask():
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
 def settings():
+    if not has_permission(session["user_id"], "settings.view"):
+        flash("You do not have permission to view settings.", "danger")
+        return redirect(url_for("tasks"))
     preferences = get_notification_preferences(session["user_id"])
     user = db.session.get(User, session["user_id"])
     if request.method == "POST":
+        if not has_permission(session["user_id"], "settings.edit"):
+            flash("You do not have permission to edit settings.", "danger")
+            return redirect(url_for("settings"))
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
             return redirect(url_for("settings"))
@@ -1340,6 +1728,7 @@ def team_detail(team_id):
                 db.session.add(Notification(user_id=assignee_id, message=f"team_task:{task.id}: New team task assigned: {title}", created_at=datetime.now().isoformat(timespec="minutes")))
             write_audit("created", "task", task.id, new_value={"team_id": team.id, "title": title, "assignee": assignee_id})
             db.session.commit()
+            record_realtime_event("TASK_CREATED", session["user_id"], "task", task.id, {"title": task.title, "status": task.status, "priority": task.priority, "teamId": team.id}, {f"team:{team.id}", f"user:{assignee_id}", f"user:{session['user_id']}"})
             flash("Team task created successfully.", "success")
             return redirect(url_for("team_detail", team_id=team.id))
 
@@ -1364,6 +1753,7 @@ def team_detail(team_id):
                     created_at=datetime.now().isoformat(timespec="seconds"),
                 ))
             db.session.commit()
+            record_realtime_event("COMMENT_CREATED", session["user_id"], "team", team.id, {"messageId": team_message.id, "body": team_message.body, "username": sender.username if sender else "User"}, {f"team:{team.id}"})
             if is_async_request:
                 return {
                     "ok": True,
@@ -1462,10 +1852,83 @@ def team_detail(team_id):
     )
 
 
+@app.route("/roles", methods=["GET", "POST"])
+@login_required
+def roles():
+    if not has_permission(session["user_id"], "roles.view"):
+        flash("You do not have permission to view roles.", "danger")
+        return redirect(url_for("tasks"))
+    if request.method == "POST":
+        submitted_actions = request.form.getlist("action")
+        action = "delete" if "delete" in submitted_actions else submitted_actions[0] if submitted_actions else "save"
+        role = db.session.get(Role, request.form.get("role_id", type=int)) if request.form.get("role_id") else None
+        required = "roles.create" if action == "create" else "roles.delete" if action == "delete" else "roles.edit"
+        if not has_permission(session["user_id"], required):
+            return {"ok": False, "error": "You are not authorized for this role action."}, 403
+        if action == "create":
+            name = request.form.get("name", "").strip()
+            if not name or len(name) > 80 or Role.query.filter_by(name=name).first():
+                flash("Role name is required and must be unique.", "danger")
+            else:
+                role = Role(name=name, description=request.form.get("description", "").strip(), is_system=False, created_at=datetime.now().isoformat(timespec="seconds"))
+                db.session.add(role)
+                db.session.flush()
+                write_audit("ROLE_CREATED", "role", role.id, new_value={"name": role.name})
+                db.session.commit()
+                flash("Role created successfully.", "success")
+            return redirect(url_for("roles"))
+        if not role:
+            return {"ok": False, "error": "Role not found."}, 404
+        if action == "delete":
+            if role.name == "Super Admin" or role.is_system:
+                return {"ok": False, "error": "System roles cannot be deleted."}, 403
+            UserRole.query.filter_by(role_id=role.id).delete()
+            RolePermission.query.filter_by(role_id=role.id).delete()
+            db.session.delete(role)
+            write_audit("ROLE_DELETED", "role", role.id, old_value={"name": role.name})
+            db.session.commit()
+            flash("Role deleted successfully.", "success")
+            return redirect(url_for("roles"))
+        old_permissions = {row.permission_id: row.scope for row in RolePermission.query.filter_by(role_id=role.id).all()}
+        RolePermission.query.filter_by(role_id=role.id).delete()
+        selected = []
+        for key in ALL_PERMISSIONS:
+            if request.form.get(f"permission_{key}") == "on":
+                scope = request.form.get(f"scope_{key}", "ANY")
+                if scope not in PERMISSION_SCOPES:
+                    continue
+                permission = Permission.query.filter_by(key=key).first()
+                if permission:
+                    db.session.add(RolePermission(role_id=role.id, permission_id=permission.id, scope=scope))
+                    selected.append({"permission": key, "scope": scope})
+        role.description = request.form.get("description", role.description or "").strip()
+        write_audit("ROLE_PERMISSION_UPDATED", "role", role.id, old_value=old_permissions, new_value=selected)
+        db.session.commit()
+        affected_user_ids = [user_id for (user_id,) in db.session.query(UserRole.user_id).filter_by(role_id=role.id).all()]
+        for user_id in affected_user_ids:
+            record_realtime_event("PERMISSIONS_UPDATED", session["user_id"], "user", user_id, {"roleId": role.id, "roleName": role.name}, {f"user:{user_id}"})
+        flash("Role permissions updated successfully.", "success")
+        return redirect(url_for("roles"))
+    role_rows = []
+    for role in Role.query.order_by(Role.name).all():
+        role_rows.append({"role": role, "permissions": {row.key: rp.scope for rp, row in db.session.query(RolePermission, Permission).join(Permission, Permission.id == RolePermission.permission_id).filter(RolePermission.role_id == role.id).all()}})
+    return render_template("roles.html", role_rows=role_rows, permission_catalog=PERMISSION_CATALOG, scopes=sorted(PERMISSION_SCOPES), notifications=get_shared_data()[0], unread_count=get_shared_data()[1])
+
+
+@app.route("/api/me/permissions")
+@login_required
+def my_permissions():
+    rows = db.session.query(Permission.key, Role.name, RolePermission.scope).join(RolePermission, RolePermission.permission_id == Permission.id).join(Role, Role.id == RolePermission.role_id).join(UserRole, UserRole.role_id == Role.id).filter(UserRole.user_id == session["user_id"]).all()
+    return {"permissions": [{"key": key, "role": role, "scope": scope} for key, role, scope in rows]}
+
+
 @app.route("/users", methods=["GET", "POST"])
-@admin_required
+@login_required
 def users():
     view = request.args.get("view", "all")
+    if not has_permission(session["user_id"], "users.view"):
+        flash("You do not have permission to view users.", "danger")
+        return redirect(url_for("tasks"))
     if request.method == "POST":
         if not valid_csrf():
             flash("Invalid request. Please refresh and try again.", "danger")
@@ -1473,11 +1936,17 @@ def users():
         action = request.form.get("action", "save")
         user_id = request.form.get("user_id", type=int)
         user = User.query.get(user_id) if user_id else None
+        required_permission = "users.delete" if action == "delete" else "users.edit" if user else "users.create"
+        if not has_permission(session["user_id"], required_permission):
+            flash("You do not have permission to manage users this way.", "danger")
+            return redirect(url_for("users", view=view))
         if action == "delete":
             if not user:
                 flash("User not found.", "danger")
             elif user.id == session["user_id"]:
                 flash("You cannot delete your own account.", "danger")
+            elif is_super_admin(user.id) and not is_super_admin(session["user_id"]):
+                flash("Only a Super Admin can delete a Super Admin account.", "danger")
             else:
                 Task.query.filter_by(user_id=user.id).update({"user_id": None})
                 Notification.query.filter_by(user_id=user.id).delete()
@@ -1499,7 +1968,17 @@ def users():
                     flash("Password must contain at least 8 characters.", "danger")
                     return redirect(url_for("users", view=view))
                 user.password_hash = generate_password_hash(new_password)
+            submitted_role_ids = [int(value) for value in request.form.getlist("role_ids") if value.isdigit()]
+            if not submitted_role_ids:
+                legacy_role = Role.query.filter_by(name=user.role).first()
+                submitted_role_ids = [legacy_role.id] if legacy_role else []
+            roles_ok, roles_error = sync_user_roles(user, submitted_role_ids, session["user_id"])
+            if not roles_ok:
+                db.session.rollback()
+                flash(roles_error, "danger")
+                return redirect(url_for("users", view=view))
             db.session.commit()
+            record_realtime_event("PERMISSIONS_UPDATED", session["user_id"], "user", user.id, {"reason": "roles_changed"}, {f"user:{user.id}"})
             flash("User updated successfully.", "success")
             return redirect(url_for("users", view=view))
         first_name = request.form.get("first_name", "").strip()
@@ -1513,10 +1992,21 @@ def users():
         if role not in VALID_ROLES or User.query.filter_by(username=username).first():
             flash("Username already exists or role is invalid.", "danger")
             return redirect(url_for("users", view=view))
-        db.session.add(User(first_name=first_name, last_name=last_name, username=username,
+        new_user = User(first_name=first_name, last_name=last_name, username=username,
                             phone=request.form.get("phone", "").strip(), email=request.form.get("email", "").strip() or None, gender=request.form.get("gender", "").strip(),
                             password_hash=generate_password_hash(password), role=role,
-                            created_at=datetime.now().isoformat(timespec="minutes")))
+                            created_at=datetime.now().isoformat(timespec="minutes"))
+        db.session.add(new_user)
+        db.session.flush()
+        submitted_role_ids = [int(value) for value in request.form.getlist("role_ids") if value.isdigit()]
+        if not submitted_role_ids:
+            default_role = Role.query.filter_by(name=role if role in VALID_ROLES else "User").first()
+            submitted_role_ids = [default_role.id] if default_role else []
+        roles_ok, roles_error = sync_user_roles(new_user, submitted_role_ids, session["user_id"])
+        if not roles_ok:
+            db.session.rollback()
+            flash(roles_error, "danger")
+            return redirect(url_for("users", view=view))
         db.session.commit()
         flash("User added successfully.", "success")
         return redirect(url_for("users", view=view))
@@ -1527,12 +2017,16 @@ def users():
     elif view == "admins":
         users_query = [user for user in users_query if user[7] == "Admin"]
     notifications, unread_count = get_shared_data()
-    return render_template("users.html", users_list=users_query, current_view=view, notifications=notifications, unread_count=unread_count)
+    role_assignments = {user.id: {role.name for role in user_roles(user)} for user in User.query.all()}
+    return render_template("users.html", users_list=users_query, current_view=view, roles=Role.query.order_by(Role.name).all(), role_assignments=role_assignments, notifications=notifications, unread_count=unread_count)
 
 
 @app.route("/tasks")
 @login_required
 def tasks():
+    if not has_permission(session["user_id"], "tasks.view"):
+        flash("You do not have permission to view tasks.", "danger")
+        return redirect(url_for("index"))
     tasks_query = task_rows_for_current_user()
     requested_view = request.args.get("view", "all")
     initial_tab = {"all": "all", "sent": "sent", "received": "received", "urgent": "urgent"}.get(requested_view, "inbox")
@@ -1580,6 +2074,9 @@ def tasks():
 @app.route("/add_task", methods=["GET", "POST"])
 @login_required
 def add_task():
+    if not has_permission(session["user_id"], "tasks.create"):
+        flash("You do not have permission to create tasks.", "danger")
+        return redirect(url_for("tasks"))
     if request.method == "GET":
         return render_template("add_task.html", users_list=User.query.order_by(User.username).all(), teams=Team.query.order_by(Team.name).all())
     if not valid_csrf():
@@ -1620,6 +2117,8 @@ def add_task():
     preference = "task_created" if assigned_user_id == session["user_id"] else "task_assigned"
     send_email_notification(assigned_user.email if assigned_user else None, f"New task assigned: {title}", f"You have been assigned a new task: {title}", assigned_user_id, preference)
     db.session.commit()
+    record_realtime_event("TASK_CREATED", session["user_id"], "task", task.id, {"title": task.title, "status": task.status, "priority": task.priority, "dueDate": task.due_date}, {f"user:{assigned_user_id}", f"user:{session['user_id']}"})
+    record_realtime_event("NOTIFICATION_CREATED", session["user_id"], "notification", assigned_user_id, {"message": f"New task assigned: {title}"}, {f"user:{assigned_user_id}"})
     flash("Task created successfully.", "success")
     return redirect(url_for("tasks"))
 
@@ -1634,7 +2133,7 @@ def update_status(id, new_status):
         flash("Invalid status.", "danger")
         return redirect(url_for("tasks"))
     task = db.session.get(Task, id)
-    if not task or (session.get("role") != "Admin" and (task.user_id != session["user_id"] or task.creator_id == session["user_id"])):
+    if not task or not has_permission(session["user_id"], "tasks.change_status", task):
         flash("You do not have permission to update this task.", "danger")
         return redirect(url_for("tasks"))
     comment_body = request.form.get("comment", "").strip()
@@ -1658,6 +2157,9 @@ def update_status(id, new_status):
         db.session.commit()
     write_audit("status_changed", "task", task.id, old_value={"status": old_status}, new_value={"status": new_status})
     db.session.commit()
+    record_realtime_event("TASK_STATUS_CHANGED", session["user_id"], "task", task.id, {"oldStatus": old_status, "newStatus": new_status}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
+    if creator and creator.id != session["user_id"]:
+        record_realtime_event("NOTIFICATION_CREATED", session["user_id"], "notification", creator.id, {"message": f"Task status changed: {task.title}"}, {f"user:{creator.id}"})
     flash("Task status updated successfully.", "success")
     return redirect(url_for("tasks"))
 
@@ -1719,6 +2221,9 @@ def delete_dependency(task_id, dependency_id):
 @app.route("/reports")
 @login_required
 def reports():
+    if not has_permission(session["user_id"], "reports.view"):
+        flash("You do not have permission to view reports.", "danger")
+        return redirect(url_for("tasks"))
     reports_data = task_rows_for_current_user()
     notifications, unread_count = get_shared_data()
     return render_template("reports.html", reports=reports_data, users_count=User.query.count(), notifications=notifications, unread_count=unread_count)
@@ -1727,6 +2232,9 @@ def reports():
 @app.route("/analytics")
 @login_required
 def analytics():
+    if not has_permission(session["user_id"], "reports.view"):
+        flash("You do not have permission to view analytics.", "danger")
+        return redirect(url_for("tasks"))
     visible = visible_tasks_for_user(session["user_id"])
     today = date.today().isoformat()
     status_counts = {status: sum(task.status == status for task in visible) for status in sorted(VALID_STATUSES)}
@@ -1788,8 +2296,11 @@ def analytics():
 
 
 @app.route("/audit-logs")
-@admin_required
+@login_required
 def audit_logs():
+    if not has_permission(session["user_id"], "audit_logs.view"):
+        flash("You do not have permission to view audit logs.", "danger")
+        return redirect(url_for("tasks"))
     logs = AuditLog.query.order_by(AuditLog.id.desc()).limit(500).all()
     notifications, unread_count = get_shared_data()
     return render_template("audit_logs.html", logs=logs, notifications=notifications, unread_count=unread_count)
@@ -1799,13 +2310,16 @@ def audit_logs():
 @login_required
 def task_comments(id):
     task = db.session.get(Task, id)
-    if not task or task.id not in {visible.id for visible in visible_tasks_for_user(session["user_id"])}:
+    if not task or not has_permission(session["user_id"], "comments.view", task) or not can_access_task(session["user_id"], task):
         flash("Task not found or not accessible.", "danger")
         return redirect(url_for("tasks"))
     if request.method == "POST":
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
         else:
+            if not has_permission(session["user_id"], "comments.create", task):
+                flash("You do not have permission to create comments.", "danger")
+                return redirect(url_for("task_comments", id=id))
             body = request.form.get("body", "").strip()
             if body and len(body) <= 4000:
                 comment = Comment(task_id=id, user_id=session["user_id"], body=body, created_at=datetime.now().isoformat(timespec="seconds"))
@@ -1817,6 +2331,7 @@ def task_comments(id):
                     if mentioned and mentioned.id != session["user_id"]:
                         db.session.add(Notification(user_id=mentioned.id, message=f"You were mentioned in a task comment: {task.title}", created_at=datetime.now().isoformat(timespec="seconds")))
                 db.session.commit()
+                record_realtime_event("COMMENT_CREATED", session["user_id"], "task", task.id, {"commentId": comment.id, "body": comment.body}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
                 flash("Comment added.", "success")
             else:
                 flash("Comment must contain 1 to 4000 characters.", "danger")
@@ -1951,7 +2466,7 @@ def export_data(resource, file_format):
 @login_required
 def edit_task(id):
     task = db.session.get(Task, id)
-    if not task or (session.get("role") != "Admin" and task.creator_id != session["user_id"]):
+    if not task or not has_permission(session["user_id"], "tasks.edit", task):
         flash("Only the task sender can edit this task.", "danger")
         return redirect(url_for("tasks"))
     detail = Detail.query.filter_by(task_id=id).first()
@@ -1973,6 +2488,7 @@ def edit_task(id):
     else:
         db.session.add(Detail(task_id=id, description=request.form.get("description", "").strip(), updated_at=datetime.now().isoformat(timespec="minutes")))
     db.session.commit()
+    record_realtime_event("TASK_UPDATED", session["user_id"], "task", task.id, {"title": task.title, "priority": task.priority, "dueDate": task.due_date}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
     flash("Task updated successfully.", "success")
     return redirect(url_for("tasks"))
 
@@ -1984,7 +2500,7 @@ def delete_task(id):
         flash("Invalid request. Please try again.", "danger")
         return redirect(url_for("tasks"))
     task = db.session.get(Task, id)
-    if not task or (session.get("role") != "Admin" and task.creator_id != session["user_id"]):
+    if not task or not has_permission(session["user_id"], "tasks.delete", task):
         flash("Only the task sender can recall this task.", "danger")
         return redirect(url_for("tasks"))
     delete_comment = request.form.get("comment", "").strip()
@@ -1992,12 +2508,16 @@ def delete_task(id):
         flash("Add a reason before deleting this task.", "danger")
         return redirect(url_for("tasks", focus=task.id))
     Detail.query.filter_by(task_id=id).delete()
+    deleted_title = task.title
+    deleted_user_id = task.user_id
+    deleted_creator_id = task.creator_id
     write_audit("deleted", "task", task.id, old_value={"title": task.title, "status": task.status, "comment": delete_comment})
     db.session.delete(task)
     db.session.commit()
+    record_realtime_event("TASK_DELETED", session["user_id"], "task", id, {"title": deleted_title, "reason": delete_comment, "recipientIds": [deleted_user_id, deleted_creator_id]}, {f"user:{deleted_user_id}", f"user:{deleted_creator_id}"})
     flash("Task deleted successfully.", "success")
     return redirect(url_for("tasks"))
 
 
 if __name__ == "__main__":
-    app.run(debug=os.environ.get("FLASK_DEBUG") == "1")
+    socketio.run(app, debug=os.environ.get("FLASK_DEBUG") == "1")

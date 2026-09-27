@@ -327,10 +327,10 @@
   <p style="color:var(--muted);">You have read-only access to team messages.</p>
   {% endif %}
 
-  <div id="team-chat-messages" data-team-chat-messages style="display:grid; gap:12px;">
+  <div id="team-chat-messages" data-team-chat-messages data-team-id="{{ team.id }}" style="display:grid; gap:12px;">
     {% if team_messages %}
     {% for message in team_messages %}
-    <div data-team-chat-message style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
+    <div data-team-chat-message data-team-chat-message-id="{{ message.id }}" style="padding:14px 16px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
         <strong style="font-size:13px;">{{ user_lookup[message.user_id].username if message.user_id in user_lookup else 'User' }}</strong>
         <small style="color:var(--muted); font-size:10px;">{{ message.created_at }}</small>
