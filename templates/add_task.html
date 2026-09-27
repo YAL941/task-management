@@ -9,7 +9,7 @@
         <a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>→</span></a>
     </div>
 
-    <form method="POST" class="card-surface task-form-card">
+    <form method="POST" enctype="multipart/form-data" class="card-surface task-form-card">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-section"><div class="form-section-title"><span class="form-number">01</span><div><strong>Task details</strong><small>Give the work a clear, useful name.</small></div></div><label class="form-label">Title<input class="field" type="text" name="title" required maxlength="100" value="{{ task.title if editing|default(false) else '' }}" placeholder="Task title"></label><label class="form-label">Description<textarea class="field" name="description" rows="4" placeholder="What does done look like?">{{ detail.description if editing|default(false) and detail else '' }}</textarea></label></div>
         
@@ -27,8 +27,77 @@
                     <option value="High">High</option>
                 </select></label><label class="form-label">Due date<input class="field" type="date" name="due_date" value="{{ task.due_date if editing|default(false) else '' }}"></label></div></div>
 
+        <div class="form-section"><div class="form-section-title"><span class="form-number">{{ '04' if session.get('role') == 'Admin' else '03' }}</span><div><strong>Attachments</strong><small>Attach documents or images related to this task.</small></div></div>
+            <div class="upload-dropzone" data-upload-dropzone style="border:1.5px dashed #cbd5e1; border-radius:12px; padding:18px; background:#f8fafc; display:grid; gap:10px;">
+                <label for="attachments" class="secondary-action" style="display:inline-flex; width:max-content; cursor:pointer;">+ Add files</label>
+                <input id="attachments" type="file" name="attachments" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt" style="display:none;">
+                <small style="color:var(--muted);">Drag & drop files here or click to browse. Multiple files are supported.</small>
+            </div>
+            <div data-selected-files style="display:grid; gap:8px; margin-top:12px;"></div>
+        </div>
+
         <div class="form-actions"><a href="{{ url_for('tasks') }}" class="secondary-action">Cancel</a><button type="submit" class="primary-action">{{ 'Save changes' if editing|default(false) else 'Create task' }} <span>→</span></button>
         </div>
     </form>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const fileInput = document.getElementById('attachments');
+            const dropzone = document.querySelector('[data-upload-dropzone]');
+            const selectedFiles = document.querySelector('[data-selected-files]');
+            if (!fileInput || !dropzone || !selectedFiles) return;
+            const formatSize = (bytes) => {
+                if (!bytes) return '0 KB';
+                const units = ['B', 'KB', 'MB', 'GB'];
+                let value = bytes;
+                let unitIndex = 0;
+                while (value >= 1024 && unitIndex < units.length - 1) {
+                    value /= 1024;
+                    unitIndex += 1;
+                }
+                return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+            };
+            const renderFiles = () => {
+                const files = Array.from(fileInput.files || []);
+                if (!files.length) {
+                    selectedFiles.innerHTML = '<div style="padding:10px 12px; border:1px dashed #cbd5e1; border-radius:10px; color:var(--muted); background:#fff;">No files selected yet.</div>';
+                    return;
+                }
+                selectedFiles.innerHTML = files.map((file) => `
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:10px; background:#fff;">
+                        <div style="min-width:0; overflow:hidden;">
+                            <div style="font-weight:600; overflow-wrap:anywhere;">${file.name}</div>
+                            <small style="color:var(--muted); display:block;">${file.type || 'File'} · ${formatSize(file.size)}</small>
+                        </div>
+                        <span style="color:#16a34a; font-weight:600;">Ready</span>
+                    </div>
+                `).join('');
+            };
+            fileInput.addEventListener('change', renderFiles);
+            ['dragenter', 'dragover'].forEach((eventName) => {
+                dropzone.addEventListener(eventName, (event) => {
+                    event.preventDefault();
+                    dropzone.style.borderColor = '#60a5fa';
+                    dropzone.style.background = '#eff6ff';
+                });
+            });
+            ['dragleave', 'drop'].forEach((eventName) => {
+                dropzone.addEventListener(eventName, (event) => {
+                    event.preventDefault();
+                    dropzone.style.borderColor = '#cbd5e1';
+                    dropzone.style.background = '#f8fafc';
+                });
+            });
+            dropzone.addEventListener('drop', (event) => {
+                const droppedFiles = event.dataTransfer?.files || [];
+                if (!droppedFiles.length) return;
+                const dataTransfer = new DataTransfer();
+                Array.from(fileInput.files || []).forEach((file) => dataTransfer.items.add(file));
+                Array.from(droppedFiles).forEach((file) => dataTransfer.items.add(file));
+                fileInput.files = dataTransfer.files;
+                renderFiles();
+            });
+            renderFiles();
+        });
+    </script>
 </div>
 {% endblock %}

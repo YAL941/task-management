@@ -93,12 +93,35 @@
 
     <div class="form-section">
       <div class="form-section-title"><span class="form-number">04</span><div><strong>Attachments</strong><small>Files are stored outside the database; this list contains metadata only.</small></div></div>
-      {% if has_permission_upload|default(false) %}<form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_task_attachments', task_id=task.id) }}" style="display:flex; align-items:center; gap:10px; margin-bottom:12px;"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input class="field" type="file" name="attachments" multiple required><button class="secondary-action" type="submit">Upload</button></form>{% endif %}
-      <div style="display:grid; gap:8px;">
+      {% if has_permission_upload|default(false) %}
+      <form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_task_attachments', task_id=task.id) }}" style="display:grid; gap:12px; margin-bottom:16px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <label for="task-attachments" class="secondary-action" style="display:inline-flex; cursor:pointer;">+ Add files</label>
+          <input id="task-attachments" type="file" name="attachments" multiple required style="display:none;">
+          <small style="color:var(--muted);">Multiple files supported.</small>
+        </div>
+        <button class="primary-action" type="submit" style="width:max-content;">Upload attachments <span>→</span></button>
+      </form>
+      {% endif %}
+      <div style="display:grid; gap:10px;">
         {% for attachment in attachments %}
-        <div data-attachment-id="{{ attachment.id }}" style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:9px; background:#fbfdff;">
-          <div style="min-width:0;"><a href="{{ url_for('download_attachment', attachment_id=attachment.id) }}" style="font-weight:600; color:var(--blue); overflow-wrap:anywhere;">{{ attachment.filename }}</a><small style="display:block; color:var(--muted);">{{ attachment.mime_type or 'File' }} · {{ ((attachment.file_size or 0) / 1024)|round(1) }} KB</small></div>
-          {% if can_delete_attachments %}<form method="POST" action="{{ url_for('delete_attachment', attachment_id=attachment.id) }}" data-confirm="Delete this attachment?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="logout-link" type="submit">Delete</button></form>{% endif %}
+        <div data-attachment-id="{{ attachment.id }}" style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border:1px solid #edf2f7; border-radius:12px; background:#fbfdff;">
+          <div style="display:flex; align-items:center; gap:12px; min-width:0; flex:1;">
+            <div style="width:42px; height:42px; border-radius:10px; display:grid; place-items:center; background:#e0f2fe; color:#0369a1; font-weight:700;">{{ (attachment.filename or 'F')[:1]|upper }}</div>
+            <div style="min-width:0; flex:1;">
+              <div style="font-weight:700; color:var(--ink); overflow-wrap:anywhere;">{{ attachment.filename }}</div>
+              <small style="display:block; color:var(--muted);">{{ attachment.mime_type or 'File' }} · {{ ((attachment.file_size or 0) / 1024)|round(1) }} KB</small>
+              <small style="display:block; color:var(--muted);">Uploaded to task #{{ task.id }}</small>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+            {% if attachment.mime_type and attachment.mime_type.startswith('image/') or attachment.filename.lower().endswith('.png') or attachment.filename.lower().endswith('.jpg') or attachment.filename.lower().endswith('.jpeg') or attachment.filename.lower().endswith('.webp') or attachment.filename.lower().endswith('.pdf') %}
+            <a class="secondary-action" href="{{ url_for('preview_attachment', attachment_id=attachment.id) }}" target="_blank" rel="noopener noreferrer">Preview</a>
+            {% endif %}
+            <a class="secondary-action" href="{{ url_for('download_attachment', attachment_id=attachment.id) }}">Download</a>
+            {% if can_delete_attachments %}<form method="POST" action="{{ url_for('delete_attachment', attachment_id=attachment.id) }}" data-confirm="Delete this attachment?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="logout-link" type="submit">Delete</button></form>{% endif %}
+          </div>
         </div>
         {% else %}<p style="margin:0; color:var(--muted);">No attachments.</p>{% endfor %}
       </div>

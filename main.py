@@ -54,8 +54,32 @@ app.config["SQLALCHEMY_DATABASE_URI"] = database_url or f"sqlite:///{default_dat
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 app.config["UPLOAD_FOLDER"] = os.path.join(app.instance_path, "uploads")
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB Limit
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt'}
+app.config["MAX_FILE_SIZE"] = int(os.environ.get("MAX_FILE_SIZE", 16 * 1024 * 1024))
+app.config["MAX_CONTENT_LENGTH"] = app.config["MAX_FILE_SIZE"]
+app.config["ALLOWED_UPLOAD_EXTENSIONS"] = {
+    ext.strip().lower().lstrip(".")
+    for ext in os.environ.get(
+        "ALLOWED_UPLOAD_EXTENSIONS",
+        "png,jpg,jpeg,gif,webp,pdf,doc,docx,xls,xlsx,csv,txt",
+    ).split(",")
+    if ext.strip()
+}
+app.config["ALLOWED_UPLOAD_MIME_TYPES"] = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/csv",
+    "text/plain",
+    "application/octet-stream",
+}
+ALLOWED_EXTENSIONS = set(app.config["ALLOWED_UPLOAD_EXTENSIONS"])
+MAX_FILE_SIZE = app.config["MAX_FILE_SIZE"]
 db = SQLAlchemy(app)
 
 socketio = SocketIO(app, cors_allowed_origins=None, async_mode="threading", manage_session=False)
@@ -470,7 +494,45 @@ def can(permission, resource=None):
 
 
 def is_allowed_upload(filename):
-    return bool(filename and "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS)
+    if not filename:
+        return False
+    name = Path(filename).name
+    if not name or "." not in name:
+        return False
+    extension = name.rsplit(".", 1)[1].lower().lstrip(".")
+    return extension in set(app.config.get("ALLOWED_UPLOAD_EXTENSIONS", ALLOWED_EXTENSIONS))
+
+
+def _read_upload_size(upload):
+    stream = getattr(upload, "stream", None)
+    if stream is None:
+        return 0
+    pos = stream.tell()
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(pos)
+    return size
+
+
+def _inspect_file_signature(upload):
+    if not upload or not upload.filename:
+        return
+    original_name = secure_filename(upload.filename)
+    if not original_name:
+        raise ValueError("A file name is invalid")
+    ext = Path(original_name).suffix.lower().lstrip(".")
+    raw = upload.read()
+    upload.stream.seek(0)
+    if not raw:
+        raise ValueError(f"The file '{original_name}' is empty.")
+    if ext in {"png"} and not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"The file '{original_name}' is not a valid PNG image.")
+    if ext in {"jpg", "jpeg"} and not raw.startswith(b"\xff\xd8\xff"):
+        raise ValueError(f"The file '{original_name}' is not a valid JPEG image.")
+    if ext == "webp" and not (raw.startswith(b"RIFF") and b"WEBP" in raw[:12]):
+        raise ValueError(f"The file '{original_name}' is not a valid WEBP image.")
+    if ext == "pdf" and not raw.startswith(b"%PDF"):
+        raise ValueError(f"The file '{original_name}' is not a valid PDF file.")
 
 
 def storage_path(storage_key):
@@ -485,8 +547,21 @@ def validate_uploads(uploads):
     for upload in uploads:
         if not upload or not upload.filename:
             continue
-        if not is_allowed_upload(upload.filename):
-            raise ValueError(f"Unsupported file type: {upload.filename}")
+        filename = secure_filename(upload.filename)
+        if not filename:
+            raise ValueError("A file name is invalid")
+        if not is_allowed_upload(filename):
+            raise ValueError(f"Unsupported file type: {filename}")
+        mime_type = (upload.mimetype or "").lower()
+        allowed_mimes = app.config.get("ALLOWED_UPLOAD_MIME_TYPES", set())
+        if mime_type and mime_type not in allowed_mimes:
+            raise ValueError(f"Unsupported file type: {filename}")
+        size = _read_upload_size(upload)
+        if size <= 0:
+            raise ValueError(f"The file '{filename}' is empty.")
+        if size > app.config["MAX_FILE_SIZE"]:
+            raise ValueError(f"The file '{filename}' is too large. Maximum allowed size is {app.config['MAX_FILE_SIZE']} bytes.")
+        _inspect_file_signature(upload)
 
 
 def save_task_attachments(task_id, uploads, uploaded_by):
@@ -595,6 +670,24 @@ def reconcile_live_meetings():
 with app.app_context():
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     db.create_all()
+
+    existing_tables = set(inspect(db.engine).get_table_names())
+    if "attachments" not in existing_tables:
+        with db.engine.begin() as connection:
+            connection.execute(text("""
+                CREATE TABLE attachments (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    uploaded_by INTEGER NOT NULL,
+                    filename VARCHAR(255) NOT NULL,
+                    storage_name VARCHAR(255) NOT NULL,
+                    mime_type VARCHAR(100),
+                    file_size INTEGER,
+                    created_at VARCHAR(30) NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id),
+                    FOREIGN KEY(uploaded_by) REFERENCES users(id)
+                )
+            """))
 
     alter_add = "ADD" if db.engine.dialect.name == "mssql" else "ADD COLUMN"
     task_columns = {column["name"] for column in inspect(db.engine).get_columns("tasks")}
@@ -1275,13 +1368,38 @@ def task_view(task_id):
     )
 
 
+def attachment_supported_for_preview(attachment):
+    if not attachment:
+        return False
+    mime_type = (attachment.mime_type or "").lower()
+    if mime_type.startswith("image/") or mime_type == "application/pdf":
+        return True
+    suffix = Path((attachment.filename or "")).suffix.lower()
+    return suffix in {".png", ".jpg", ".jpeg", ".webp", ".pdf"}
+
+
+@app.route("/attachments/<int:attachment_id>/preview")
+@login_required
+def preview_attachment(attachment_id):
+    attachment = db.session.get(Attachment, attachment_id)
+    task = db.session.get(Task, attachment.task_id) if attachment else None
+    if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.view", task):
+        abort(403)
+    if not attachment_supported_for_preview(attachment):
+        abort(404)
+    target = storage_path(attachment.storage_key)
+    if not target.is_file():
+        abort(404)
+    return send_file(target, mimetype=attachment.mime_type or "application/octet-stream", as_attachment=False)
+
+
 @app.route("/attachments/<int:attachment_id>/download")
 @login_required
 def download_attachment(attachment_id):
     attachment = db.session.get(Attachment, attachment_id)
     task = db.session.get(Task, attachment.task_id) if attachment else None
     if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.view", task):
-        abort(404)
+        abort(403)
     target = storage_path(attachment.storage_key)
     if not target.is_file():
         abort(404)
@@ -1293,7 +1411,7 @@ def download_attachment(attachment_id):
 def upload_task_attachments(task_id):
     task = db.session.get(Task, task_id)
     if not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.upload", task):
-        abort(404)
+        abort(403)
     if not valid_csrf():
         flash("Invalid request. Please try again.", "danger")
         return redirect(url_for("task_view", task_id=task_id))
@@ -1323,8 +1441,8 @@ def upload_task_attachments(task_id):
 def delete_attachment(attachment_id):
     attachment = db.session.get(Attachment, attachment_id)
     task = db.session.get(Task, attachment.task_id) if attachment else None
-    if not attachment or not task or not has_permission(session["user_id"], "attachments.delete", task):
-        abort(404)
+    if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.delete", task):
+        abort(403)
     if not valid_csrf():
         return {"ok": False, "error": "Invalid request"}, 400
     storage_key = attachment.storage_key
