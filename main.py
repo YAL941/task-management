@@ -4,6 +4,7 @@ import json
 import re
 import csv
 import io
+import hashlib
 import smtplib
 import ssl
 import uuid
@@ -13,12 +14,15 @@ from functools import wraps
 from pathlib import Path
 from urllib.request import Request as UrlRequest, urlopen
 
-from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for, abort
+
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
 from sqlalchemy import func, inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+
 
 
 def load_environment_file():
@@ -49,7 +53,11 @@ if database_url and database_url.startswith("postgres://"):
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url or f"sqlite:///{default_database}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
+app.config["UPLOAD_FOLDER"] = os.path.join(app.instance_path, "uploads")
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB Limit
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt'}
 db = SQLAlchemy(app)
+
 socketio = SocketIO(app, cors_allowed_origins=None, async_mode="threading", manage_session=False)
 realtime_connections = {}
 
@@ -184,6 +192,23 @@ class Detail(db.Model):
     attachments = db.Column(db.String(255))
     actual_hours = db.Column(db.Float, default=0.0)
     updated_at = db.Column(db.String(30))
+
+
+class Attachment(db.Model):
+    __tablename__ = "attachments"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    task_id = db.Column(db.Integer, db.ForeignKey("tasks.id"), nullable=False)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    storage_name = db.Column(db.String(255), nullable=False)
+    mime_type = db.Column(db.String(100))
+    file_size = db.Column(db.Integer)
+    created_at = db.Column(db.String(30), nullable=False)
+
+    @property
+    def storage_key(self):
+        return self.storage_name
+
 
 
 class Notification(db.Model):
@@ -346,9 +371,9 @@ ROLE_DEFAULTS = {
     "Manager": ({
         "tasks.view", "tasks.create", "tasks.edit", "tasks.assign", "tasks.reassign", "tasks.change_status",
         "tasks.change_priority", "tasks.change_due_date", "comments.view", "comments.create", "reports.view",
-        "reports.export", "notifications.view", "settings.view", "settings.edit", "users.view",
+        "reports.export", "notifications.view", "settings.view", "settings.edit", "users.view", "attachments.view", "attachments.upload", "attachments.delete",
     }, "TEAM"),
-    "User": ({"tasks.view", "tasks.create", "tasks.change_status", "tasks.edit_own", "tasks.assign_own", "comments.view", "comments.create", "notifications.view", "settings.view", "settings.edit"}, "OWN"),
+    "User": ({"tasks.view", "tasks.create", "tasks.change_status", "tasks.edit_own", "tasks.assign_own", "comments.view", "comments.create", "notifications.view", "settings.view", "settings.edit", "attachments.view", "attachments.upload"}, "OWN"),
 }
 
 
@@ -444,6 +469,62 @@ def can(permission, resource=None):
     return has_permission(session.get("user_id"), permission, resource)
 
 
+def is_allowed_upload(filename):
+    return bool(filename and "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS)
+
+
+def storage_path(storage_key):
+    root = Path(app.config["UPLOAD_FOLDER"]).resolve()
+    candidate = (root / storage_key).resolve()
+    if root != candidate and root not in candidate.parents:
+        raise ValueError("Invalid storage key")
+    return candidate
+
+
+def validate_uploads(uploads):
+    for upload in uploads:
+        if not upload or not upload.filename:
+            continue
+        if not is_allowed_upload(upload.filename):
+            raise ValueError(f"Unsupported file type: {upload.filename}")
+
+
+def save_task_attachments(task_id, uploads, uploaded_by):
+    saved_paths = []
+    attachment_rows = []
+    for upload in uploads:
+        if not upload or not upload.filename:
+            continue
+        original_name = secure_filename(upload.filename)
+        if not original_name:
+            raise ValueError("A file name is invalid")
+        extension = Path(original_name).suffix.lower()
+        storage_key = f"tasks/{task_id}/{uuid.uuid4().hex}{extension}"
+        target = storage_path(storage_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        upload.save(target)
+        saved_paths.append(target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        attachment_rows.append(Attachment(
+            task_id=task_id,
+            uploaded_by=uploaded_by,
+            filename=original_name,
+            storage_name=storage_key,
+            mime_type=upload.mimetype or "application/octet-stream",
+            file_size=target.stat().st_size,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        ))
+        write_audit("created", "attachment", None, new_value={"task_id": task_id, "filename": original_name, "sha256": digest})
+    db.session.add_all(attachment_rows)
+    return attachment_rows, saved_paths
+
+
+def remove_storage_file(storage_key):
+    target = storage_path(storage_key)
+    if target.exists():
+        target.unlink()
+
+
 def is_super_admin(user_id):
     return any(role.name == "Super Admin" for role in user_roles(user_id))
 
@@ -512,7 +593,9 @@ def reconcile_live_meetings():
 
 
 with app.app_context():
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     db.create_all()
+
     alter_add = "ADD" if db.engine.dialect.name == "mssql" else "ADD COLUMN"
     task_columns = {column["name"] for column in inspect(db.engine).get_columns("tasks")}
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("users")}
@@ -1174,6 +1257,7 @@ def task_view(task_id):
         return redirect(url_for("tasks"))
     detail = Detail.query.filter_by(task_id=task.id).first()
     comments = Comment.query.filter_by(task_id=task.id).order_by(Comment.id.asc()).all()
+    attachments = Attachment.query.filter_by(task_id=task.id).order_by(Attachment.id.asc()).all()
     users = {user.id: user for user in User.query.order_by(User.username).all()}
     return render_template(
         "task_details.html",
@@ -1181,11 +1265,75 @@ def task_view(task_id):
         detail=detail,
         comments=comments,
         users=users,
+        attachments=attachments,
+        can_delete_attachments=has_permission(session["user_id"], "attachments.delete", task),
+        has_permission_upload=has_permission(session["user_id"], "attachments.upload", task),
         can_change_status=has_permission(session["user_id"], "tasks.change_status", task),
         can_manage_task=has_permission(session["user_id"], "tasks.edit", task),
         notifications=get_shared_data()[0],
         unread_count=get_shared_data()[1],
     )
+
+
+@app.route("/attachments/<int:attachment_id>/download")
+@login_required
+def download_attachment(attachment_id):
+    attachment = db.session.get(Attachment, attachment_id)
+    task = db.session.get(Task, attachment.task_id) if attachment else None
+    if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.view", task):
+        abort(404)
+    target = storage_path(attachment.storage_key)
+    if not target.is_file():
+        abort(404)
+    return send_file(target, as_attachment=True, download_name=attachment.filename, mimetype=attachment.mime_type or "application/octet-stream")
+
+
+@app.route("/tasks/<int:task_id>/attachments", methods=["POST"])
+@login_required
+def upload_task_attachments(task_id):
+    task = db.session.get(Task, task_id)
+    if not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.upload", task):
+        abort(404)
+    if not valid_csrf():
+        flash("Invalid request. Please try again.", "danger")
+        return redirect(url_for("task_view", task_id=task_id))
+    uploads = request.files.getlist("attachments")
+    try:
+        validate_uploads(uploads)
+        attachment_rows, saved_paths = save_task_attachments(task.id, uploads, session["user_id"])
+        db.session.commit()
+    except ValueError as error:
+        db.session.rollback()
+        flash(str(error), "danger")
+        return redirect(url_for("task_view", task_id=task_id))
+    except Exception:
+        db.session.rollback()
+        for saved_path in locals().get("saved_paths", []):
+            if saved_path.exists():
+                saved_path.unlink()
+        raise
+    if attachment_rows:
+        record_realtime_event("ATTACHMENTS_ADDED", session["user_id"], "task", task.id, {"attachments": [{"id": row.id, "filename": row.filename, "size": row.file_size, "mimeType": row.mime_type, "storageKey": row.storage_key} for row in attachment_rows]}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
+        flash(f"Added {len(attachment_rows)} attachment(s).", "success")
+    return redirect(url_for("task_view", task_id=task_id))
+
+
+@app.route("/attachments/<int:attachment_id>/delete", methods=["POST"])
+@login_required
+def delete_attachment(attachment_id):
+    attachment = db.session.get(Attachment, attachment_id)
+    task = db.session.get(Task, attachment.task_id) if attachment else None
+    if not attachment or not task or not has_permission(session["user_id"], "attachments.delete", task):
+        abort(404)
+    if not valid_csrf():
+        return {"ok": False, "error": "Invalid request"}, 400
+    storage_key = attachment.storage_key
+    filename = attachment.filename
+    db.session.delete(attachment)
+    db.session.commit()
+    remove_storage_file(storage_key)
+    record_realtime_event("ATTACHMENT_DELETED", session["user_id"], "task", task.id, {"attachmentId": attachment_id, "filename": filename}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
+    return {"ok": True}
 
 
 @app.route("/assistant", methods=["GET", "POST"])
@@ -2098,6 +2246,15 @@ def add_task():
     if not assigned_user_id or not User.query.get(assigned_user_id):
         flash("Enter a valid assignee user ID.", "danger")
         return redirect(url_for("tasks"))
+    uploads = request.files.getlist("attachments")
+    if uploads and any(upload and upload.filename for upload in uploads) and not has_permission(session["user_id"], "attachments.upload"):
+        flash("You do not have permission to upload attachments.", "danger")
+        return redirect(url_for("tasks"))
+    try:
+        validate_uploads(uploads)
+    except ValueError as error:
+        flash(str(error), "danger")
+        return redirect(url_for("tasks"))
     team_id = None
     if session.get("role") == "Admin":
         team_id = request.form.get("team_id", type=int)
@@ -2109,15 +2266,25 @@ def add_task():
     db.session.add(task)
     db.session.flush()
     db.session.add(Detail(task_id=task.id, description=request.form.get("description", "").strip(), updated_at=datetime.now().isoformat(timespec="minutes")))
+    attachment_rows, saved_paths = save_task_attachments(task.id, uploads, session["user_id"])
     if assigned_user_id != session["user_id"]:
         db.session.add(Notification(user_id=assigned_user_id, message=f"New task assigned: {title}", created_at=datetime.now().isoformat(timespec="minutes")))
     write_audit("created", "task", task.id, new_value={"title": title, "assignee": assigned_user_id})
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        for saved_path in saved_paths:
+            if saved_path.exists():
+                saved_path.unlink()
+        raise
     assigned_user = db.session.get(User, assigned_user_id)
     preference = "task_created" if assigned_user_id == session["user_id"] else "task_assigned"
     send_email_notification(assigned_user.email if assigned_user else None, f"New task assigned: {title}", f"You have been assigned a new task: {title}", assigned_user_id, preference)
     db.session.commit()
     record_realtime_event("TASK_CREATED", session["user_id"], "task", task.id, {"title": task.title, "status": task.status, "priority": task.priority, "dueDate": task.due_date}, {f"user:{assigned_user_id}", f"user:{session['user_id']}"})
+    if attachment_rows:
+        record_realtime_event("ATTACHMENTS_ADDED", session["user_id"], "task", task.id, {"attachments": [{"id": row.id, "filename": row.filename, "size": row.file_size, "mimeType": row.mime_type, "storageKey": row.storage_key} for row in attachment_rows]}, {f"task:{task.id}", f"user:{assigned_user_id}", f"user:{session['user_id']}"})
     record_realtime_event("NOTIFICATION_CREATED", session["user_id"], "notification", assigned_user_id, {"message": f"New task assigned: {title}"}, {f"user:{assigned_user_id}"})
     flash("Task created successfully.", "success")
     return redirect(url_for("tasks"))

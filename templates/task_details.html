@@ -92,8 +92,21 @@
     {% endif %}
 
     <div class="form-section">
+      <div class="form-section-title"><span class="form-number">04</span><div><strong>Attachments</strong><small>Files are stored outside the database; this list contains metadata only.</small></div></div>
+      {% if has_permission_upload|default(false) %}<form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_task_attachments', task_id=task.id) }}" style="display:flex; align-items:center; gap:10px; margin-bottom:12px;"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input class="field" type="file" name="attachments" multiple required><button class="secondary-action" type="submit">Upload</button></form>{% endif %}
+      <div style="display:grid; gap:8px;">
+        {% for attachment in attachments %}
+        <div data-attachment-id="{{ attachment.id }}" style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:9px; background:#fbfdff;">
+          <div style="min-width:0;"><a href="{{ url_for('download_attachment', attachment_id=attachment.id) }}" style="font-weight:600; color:var(--blue); overflow-wrap:anywhere;">{{ attachment.filename }}</a><small style="display:block; color:var(--muted);">{{ attachment.mime_type or 'File' }} · {{ ((attachment.file_size or 0) / 1024)|round(1) }} KB</small></div>
+          {% if can_delete_attachments %}<form method="POST" action="{{ url_for('delete_attachment', attachment_id=attachment.id) }}" data-confirm="Delete this attachment?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="logout-link" type="submit">Delete</button></form>{% endif %}
+        </div>
+        {% else %}<p style="margin:0; color:var(--muted);">No attachments.</p>{% endfor %}
+      </div>
+    </div>
+
+    <div class="form-section">
       <div class="form-section-title">
-        <span class="form-number">04</span>
+        <span class="form-number">05</span>
         <div>
           <strong>Comments</strong>
           <small>Activity recorded against this task.</small>
