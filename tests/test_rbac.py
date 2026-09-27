@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from main import User, app, has_permission
+from werkzeug.security import generate_password_hash
+
+from main import User, app, db, has_permission
 
 
 def test_legacy_user_gets_seeded_granular_permissions():
@@ -20,6 +22,12 @@ def test_ownership_scope_allows_own_edit_only():
 
 
 def test_roles_page_requires_permission_and_admin_can_view():
+    with app.app_context():
+        admin = User.query.filter_by(username="admin").first()
+        if admin is not None:
+            admin.password_hash = generate_password_hash("Admin@12345")
+            db.session.commit()
+
     client = app.test_client()
     response = client.get("/roles")
     assert response.status_code == 302

@@ -19,7 +19,8 @@ from flask import Flask, flash, redirect, render_template, request, send_file, s
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
-from sqlalchemy import func, inspect, text
+from sqlalchemy import event, func, inspect, or_, text
+from sqlalchemy.engine import make_url
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -81,6 +82,14 @@ app.config["ALLOWED_UPLOAD_MIME_TYPES"] = {
 ALLOWED_EXTENSIONS = set(app.config["ALLOWED_UPLOAD_EXTENSIONS"])
 MAX_FILE_SIZE = app.config["MAX_FILE_SIZE"]
 db = SQLAlchemy(app)
+
+if make_url(app.config["SQLALCHEMY_DATABASE_URI"]).get_backend_name() == "sqlite":
+    with app.app_context():
+        @event.listens_for(db.engine, "connect")
+        def enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
 socketio = SocketIO(app, cors_allowed_origins=None, async_mode="threading", manage_session=False)
 realtime_connections = {}
@@ -338,6 +347,7 @@ class AuditLog(db.Model):
     __tablename__ = "audit_logs"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    scope_team_id = db.Column(db.Integer, nullable=True, index=True)
     action = db.Column(db.String(50), nullable=False)
     entity = db.Column(db.String(50), nullable=False)
     entity_id = db.Column(db.Integer)
@@ -345,6 +355,20 @@ class AuditLog(db.Model):
     new_value = db.Column(db.Text)
     ip_address = db.Column(db.String(64))
     created_at = db.Column(db.String(30), nullable=False)
+
+
+class AuditLogScopeOwner(db.Model):
+    __tablename__ = "audit_log_scope_owners"
+    audit_log_id = db.Column(
+        db.Integer,
+        db.ForeignKey("audit_logs.id", name="fk_audit_log_scope_owners_audit_log"),
+        primary_key=True,
+        nullable=False,
+    )
+    owner_user_id = db.Column(db.Integer, primary_key=True, nullable=False)
+    __table_args__ = (
+        db.Index("ix_audit_log_scope_owners_owner_audit", "owner_user_id", "audit_log_id"),
+    )
 
 
 class Comment(db.Model):
@@ -567,6 +591,9 @@ def validate_uploads(uploads):
 def save_task_attachments(task_id, uploads, uploaded_by):
     saved_paths = []
     attachment_rows = []
+    task = db.session.get(Task, task_id)
+    scope_owner_ids = {task.creator_id, task.user_id} if task else set()
+    scope_team_id = task.team_id if task else None
     for upload in uploads:
         if not upload or not upload.filename:
             continue
@@ -589,7 +616,14 @@ def save_task_attachments(task_id, uploads, uploaded_by):
             file_size=target.stat().st_size,
             created_at=datetime.now().isoformat(timespec="seconds"),
         ))
-        write_audit("created", "attachment", None, new_value={"task_id": task_id, "filename": original_name, "sha256": digest})
+        write_audit(
+            "created",
+            "attachment",
+            None,
+            new_value={"task_id": task_id, "filename": original_name, "sha256": digest},
+            scope_owner_ids=scope_owner_ids,
+            scope_team_id=scope_team_id,
+        )
     db.session.add_all(attachment_rows)
     return attachment_rows, saved_paths
 
@@ -704,6 +738,14 @@ with app.app_context():
     if "completed_at" not in task_columns:
         with db.engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE tasks {alter_add} completed_at VARCHAR(30)"))
+    audit_log_columns = {column["name"] for column in inspect(db.engine).get_columns("audit_logs")}
+    if "scope_team_id" not in audit_log_columns:
+        with db.engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE audit_logs {alter_add} scope_team_id INTEGER NULL"))
+    audit_log_indexes = {index["name"] for index in inspect(db.engine).get_indexes("audit_logs")}
+    if "ix_audit_logs_scope_team_id" not in audit_log_indexes:
+        with db.engine.begin() as connection:
+            connection.execute(text("CREATE INDEX ix_audit_logs_scope_team_id ON audit_logs (scope_team_id)"))
     team_columns = {column["name"] for column in inspect(db.engine).get_columns("teams")}
     for team_column, team_type in {
                 "meeting_url": "VARCHAR(500)",
@@ -771,8 +813,16 @@ def get_csrf_token():
 
 
 def valid_csrf():
+    expected = session.get("csrf_token", "")
     submitted = request.form.get("csrf_token", "") or request.headers.get("X-CSRF-Token", "")
-    return secrets.compare_digest(session.get("csrf_token", ""), submitted)
+    if not isinstance(expected, str) or not isinstance(submitted, str):
+        return False
+    if not expected or not submitted:
+        return False
+    try:
+        return secrets.compare_digest(expected, submitted)
+    except TypeError:
+        return False
 
 
 def realtime_token(user_id):
@@ -938,12 +988,71 @@ def realtime_disconnect():
     socketio.emit("presence", {"eventType": "USER_OFFLINE", "userId": user_id, "status": "offline", "timestamp": now}, to="global")
 
 
-def write_audit(action, entity, entity_id=None, old_value=None, new_value=None):
-    db.session.add(AuditLog(user_id=session.get("user_id"), action=action, entity=entity, entity_id=entity_id,
-                            old_value=json.dumps(old_value, default=str) if old_value is not None else None,
-                            new_value=json.dumps(new_value, default=str) if new_value is not None else None,
-                            ip_address=request.headers.get("X-Forwarded-For", request.remote_addr),
-                            created_at=datetime.now().isoformat(timespec="seconds")))
+def write_audit(action, entity, entity_id=None, old_value=None, new_value=None,
+                scope_owner_ids=None, scope_team_id=None):
+    audit_log = AuditLog(
+        user_id=session.get("user_id"),
+        action=action,
+        entity=entity,
+        entity_id=entity_id,
+        old_value=json.dumps(old_value, default=str) if old_value is not None else None,
+        new_value=json.dumps(new_value, default=str) if new_value is not None else None,
+        ip_address=request.headers.get("X-Forwarded-For", request.remote_addr),
+        created_at=datetime.now().isoformat(timespec="seconds"),
+        scope_team_id=scope_team_id,
+    )
+    db.session.add(audit_log)
+    db.session.flush()
+    owner_ids = {owner_id for owner_id in (scope_owner_ids or ()) if owner_id is not None}
+    if owner_ids:
+        db.session.add_all(
+            AuditLogScopeOwner(audit_log_id=audit_log.id, owner_user_id=owner_id)
+            for owner_id in owner_ids
+        )
+    return audit_log
+
+
+class AuditScopeResolver:
+    @staticmethod
+    def scopes_for_user(user_id):
+        grants = permission_explanations(user_id, "audit_logs.view")
+        if not grants or any(grant["scope"] not in PERMISSION_SCOPES for grant in grants):
+            return None
+        scopes = {grant["scope"] for grant in grants}
+        return {"ANY"} if "ANY" in scopes else scopes
+
+    @staticmethod
+    def resolve_owners(audit_log):
+        return {
+            owner_user_id
+            for (owner_user_id,) in db.session.query(AuditLogScopeOwner.owner_user_id)
+            .filter(AuditLogScopeOwner.audit_log_id == audit_log.id)
+            .all()
+        }
+
+    @staticmethod
+    def resolve_team(audit_log):
+        return audit_log.scope_team_id
+
+    @staticmethod
+    def apply_to_query(query, user_id, scopes):
+        if "ANY" in scopes:
+            return query
+
+        visibility = []
+        if "OWN" in scopes:
+            owner_log_ids = db.session.query(AuditLogScopeOwner.audit_log_id).filter(
+                AuditLogScopeOwner.owner_user_id == user_id
+            )
+            visibility.append(AuditLog.id.in_(owner_log_ids))
+        if "TEAM" in scopes:
+            member_team_ids = db.session.query(TeamMember.team_id).filter(
+                TeamMember.user_id == user_id
+            )
+            visibility.append(AuditLog.scope_team_id.in_(member_team_ids))
+        if not visibility:
+            return query.filter(AuditLog.id.in_([]))
+        return query.filter(or_(*visibility))
 
 
 def parse_import_file(upload):
@@ -1992,7 +2101,12 @@ def team_detail(team_id):
             db.session.add(Detail(task_id=task.id, description=request.form.get("description", "").strip(), updated_at=datetime.now().isoformat(timespec="minutes")))
             if assignee_id != session["user_id"]:
                 db.session.add(Notification(user_id=assignee_id, message=f"team_task:{task.id}: New team task assigned: {title}", created_at=datetime.now().isoformat(timespec="minutes")))
-            write_audit("created", "task", task.id, new_value={"team_id": team.id, "title": title, "assignee": assignee_id})
+            write_audit(
+                "created", "task", task.id,
+                new_value={"team_id": team.id, "title": title, "assignee": assignee_id},
+                scope_owner_ids={task.creator_id, task.user_id},
+                scope_team_id=task.team_id,
+            )
             db.session.commit()
             record_realtime_event("TASK_CREATED", session["user_id"], "task", task.id, {"title": task.title, "status": task.status, "priority": task.priority, "teamId": team.id}, {f"team:{team.id}", f"user:{assignee_id}", f"user:{session['user_id']}"})
             flash("Team task created successfully.", "success")
@@ -2387,7 +2501,12 @@ def add_task():
     attachment_rows, saved_paths = save_task_attachments(task.id, uploads, session["user_id"])
     if assigned_user_id != session["user_id"]:
         db.session.add(Notification(user_id=assigned_user_id, message=f"New task assigned: {title}", created_at=datetime.now().isoformat(timespec="minutes")))
-    write_audit("created", "task", task.id, new_value={"title": title, "assignee": assigned_user_id})
+    write_audit(
+        "created", "task", task.id,
+        new_value={"title": title, "assignee": assigned_user_id},
+        scope_owner_ids={task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+    )
     try:
         db.session.commit()
     except Exception:
@@ -2431,19 +2550,36 @@ def update_status(id, new_status):
             flash("This task is blocked until its prerequisite tasks are completed.", "danger")
             return redirect(url_for("tasks"))
     old_status = task.status
-    task.status = new_status
-    task.completed_at = datetime.now().isoformat(timespec="seconds") if new_status == "Completed" else None
+    status_changed = old_status != new_status
+    if status_changed:
+        task.status = new_status
+        task.completed_at = datetime.now().isoformat(timespec="seconds") if new_status == "Completed" else None
     if comment_body:
-        db.session.add(Comment(task_id=task.id, user_id=session["user_id"], body=comment_body, created_at=datetime.now().isoformat(timespec="seconds")))
+        comment = Comment(task_id=task.id, user_id=session["user_id"], body=comment_body, created_at=datetime.now().isoformat(timespec="seconds"))
+        db.session.add(comment)
+        db.session.flush()
+        write_audit(
+            "created", "comment", comment.id,
+            new_value={"task_id": task.id},
+            scope_owner_ids={comment.user_id, task.creator_id, task.user_id},
+            scope_team_id=task.team_id,
+        )
+    if status_changed:
+        write_audit(
+            "status_changed", "task", task.id,
+            old_value={"status": old_status},
+            new_value={"status": new_status},
+            scope_owner_ids={task.creator_id, task.user_id},
+            scope_team_id=task.team_id,
+        )
     db.session.commit()
     creator = db.session.get(User, task.creator_id) if task.creator_id else None
-    if creator and creator.id != session["user_id"]:
+    if status_changed and creator and creator.id != session["user_id"]:
         send_email_notification(creator.email, f"Task status changed: {task.title}", f"Task '{task.title}' is now {new_status}.", creator.id, "status_changed")
         db.session.commit()
-    write_audit("status_changed", "task", task.id, old_value={"status": old_status}, new_value={"status": new_status})
-    db.session.commit()
-    record_realtime_event("TASK_STATUS_CHANGED", session["user_id"], "task", task.id, {"oldStatus": old_status, "newStatus": new_status}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
-    if creator and creator.id != session["user_id"]:
+    if status_changed:
+        record_realtime_event("TASK_STATUS_CHANGED", session["user_id"], "task", task.id, {"oldStatus": old_status, "newStatus": new_status}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
+    if status_changed and creator and creator.id != session["user_id"]:
         record_realtime_event("NOTIFICATION_CREATED", session["user_id"], "notification", creator.id, {"message": f"Task status changed: {task.title}"}, {f"user:{creator.id}"})
     flash("Task status updated successfully.", "success")
     return redirect(url_for("tasks"))
@@ -2586,9 +2722,106 @@ def audit_logs():
     if not has_permission(session["user_id"], "audit_logs.view"):
         flash("You do not have permission to view audit logs.", "danger")
         return redirect(url_for("tasks"))
-    logs = AuditLog.query.order_by(AuditLog.id.desc()).limit(500).all()
+
+    scopes = AuditScopeResolver.scopes_for_user(session["user_id"])
+    if not scopes:
+        abort(403)
+    scoped_query = AuditScopeResolver.apply_to_query(
+        AuditLog.query, session["user_id"], scopes
+    )
+    query = scoped_query
+    action_filter = (request.args.get("action") or "").strip()
+    entity_filter = (request.args.get("entity") or "").strip()
+    search = (request.args.get("search") or "").strip()
+
+    if action_filter:
+        query = query.filter(AuditLog.action.ilike(f"%{action_filter}%"))
+    if entity_filter:
+        query = query.filter(AuditLog.entity.ilike(f"%{entity_filter}%"))
+    if search:
+        query = query.filter(
+            or_(
+                AuditLog.action.ilike(f"%{search}%"),
+                AuditLog.entity.ilike(f"%{search}%"),
+                AuditLog.new_value.ilike(f"%{search}%"),
+                AuditLog.old_value.ilike(f"%{search}%"),
+            )
+        )
+
+    sort_columns = {
+        "created_at": AuditLog.created_at,
+        "id": AuditLog.id,
+        "action": AuditLog.action,
+        "entity": AuditLog.entity,
+        "entity_id": AuditLog.entity_id,
+        "user_id": AuditLog.user_id,
+    }
+    sort = (request.args.get("sort") or "created_at").strip().lower()
+    if sort not in sort_columns:
+        sort = "created_at"
+    order = (request.args.get("order") or "desc").strip().lower()
+    if order not in {"asc", "desc"}:
+        order = "desc"
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page", 25))
+    except (TypeError, ValueError):
+        per_page = 25
+    if per_page < 1:
+        per_page = 25
+    per_page = min(per_page, 100)
+
+    total_items = query.order_by(None).count()
+    total_pages = (total_items + per_page - 1) // per_page
+    if total_pages:
+        page = min(page, total_pages)
+    else:
+        page = 1
+
+    sort_column = sort_columns[sort]
+    primary_order = sort_column.asc() if order == "asc" else sort_column.desc()
+    secondary_order = AuditLog.id.asc() if order == "asc" else AuditLog.id.desc()
+    ordering = (primary_order,) if sort == "id" else (primary_order, secondary_order)
+    logs = query.order_by(*ordering).offset((page - 1) * per_page).limit(per_page).all()
+    available_actions = [
+        row[0] for row in scoped_query.with_entities(AuditLog.action).distinct()
+        .order_by(AuditLog.action.asc()).all() if row[0]
+    ]
+    available_entities = [
+        row[0] for row in scoped_query.with_entities(AuditLog.entity).distinct()
+        .order_by(AuditLog.entity.asc()).all() if row[0]
+    ]
+    actor_names = {}
+    for user in User.query.filter(User.id.in_([log.user_id for log in logs if log.user_id])).all():
+        actor_names[user.id] = user.username
     notifications, unread_count = get_shared_data()
-    return render_template("audit_logs.html", logs=logs, notifications=notifications, unread_count=unread_count)
+    return render_template(
+        "audit_logs.html",
+        logs=logs,
+        notifications=notifications,
+        unread_count=unread_count,
+        action_filter=action_filter,
+        entity_filter=entity_filter,
+        search=search,
+        current_page=page,
+        per_page=per_page,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_previous=page > 1,
+        has_next=page < total_pages,
+        first_item=(page - 1) * per_page + 1 if total_items else 0,
+        last_item=min(page * per_page, total_items),
+        sort=sort,
+        order=order,
+        page_numbers=range(max(1, page - 2), min(total_pages, page + 2) + 1),
+        available_actions=available_actions,
+        available_entities=available_entities,
+        actor_names=actor_names,
+    )
 
 
 @app.route("/tasks/<int:id>/comments", methods=["GET", "POST"])
@@ -2609,7 +2842,12 @@ def task_comments(id):
             if body and len(body) <= 4000:
                 comment = Comment(task_id=id, user_id=session["user_id"], body=body, created_at=datetime.now().isoformat(timespec="seconds"))
                 db.session.add(comment)
-                write_audit("created", "comment", comment.id, new_value={"task_id": id})
+                write_audit(
+                    "created", "comment", comment.id,
+                    new_value={"task_id": id},
+                    scope_owner_ids={comment.user_id, task.creator_id, task.user_id},
+                    scope_team_id=task.team_id,
+                )
                 mentions = set(re.findall(r"@([A-Za-z0-9_.-]+)", body))
                 for username in mentions:
                     mentioned = User.query.filter(func.lower(User.username) == username.lower()).first()
@@ -2637,7 +2875,11 @@ def automation():
                 flash("Rule name and value are required.", "danger")
             else:
                 db.session.add(rule)
-                write_audit("created", "automation_rule", None, new_value={"name": rule.name, "event": rule.event})
+                write_audit(
+                    "created", "automation_rule", None,
+                    new_value={"name": rule.name, "event": rule.event},
+                    scope_owner_ids={rule.created_by},
+                )
                 db.session.commit()
                 flash("Automation rule created.", "success")
         return redirect(url_for("automation"))
@@ -2655,7 +2897,11 @@ def toggle_automation(id):
         rule = db.session.get(AutomationRule, id)
         if rule:
             rule.enabled = not rule.enabled
-            write_audit("toggled", "automation_rule", rule.id, new_value={"enabled": rule.enabled})
+            write_audit(
+                "toggled", "automation_rule", rule.id,
+                new_value={"enabled": rule.enabled},
+                scope_owner_ids={rule.created_by},
+            )
             db.session.commit()
             flash("Automation rule updated.", "success")
     return redirect(url_for("automation"))
@@ -2766,12 +3012,35 @@ def edit_task(id):
     if not title or len(title) > 100 or priority not in VALID_PRIORITIES:
         flash("A valid title and priority are required.", "danger")
         return redirect(url_for("tasks"))
-    task.title, task.priority, task.due_date = title, priority, due_date
-    if detail:
-        detail.description = request.form.get("description", "").strip()
-        detail.updated_at = datetime.now().isoformat(timespec="minutes")
-    else:
-        db.session.add(Detail(task_id=id, description=request.form.get("description", "").strip(), updated_at=datetime.now().isoformat(timespec="minutes")))
+    old_values = {}
+    new_values = {}
+    for field, value in (("title", title), ("priority", priority), ("due_date", due_date)):
+        previous_value = getattr(task, field)
+        if previous_value != value:
+            old_values[field] = previous_value
+            new_values[field] = value
+            setattr(task, field, value)
+
+    description = request.form.get("description", "").strip()
+    previous_description = detail.description if detail and detail.description else ""
+    if previous_description != description:
+        old_values["description"] = detail.description if detail else None
+        new_values["description"] = description
+        if detail:
+            detail.description = description
+            detail.updated_at = datetime.now().isoformat(timespec="minutes")
+        else:
+            db.session.add(Detail(task_id=id, description=description, updated_at=datetime.now().isoformat(timespec="minutes")))
+    elif not detail:
+        db.session.add(Detail(task_id=id, description=description, updated_at=datetime.now().isoformat(timespec="minutes")))
+    if old_values:
+        write_audit(
+            "updated", "task", task.id,
+            old_value=old_values,
+            new_value=new_values,
+            scope_owner_ids={task.creator_id, task.user_id},
+            scope_team_id=task.team_id,
+        )
     db.session.commit()
     record_realtime_event("TASK_UPDATED", session["user_id"], "task", task.id, {"title": task.title, "priority": task.priority, "dueDate": task.due_date}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
     flash("Task updated successfully.", "success")
@@ -2796,7 +3065,12 @@ def delete_task(id):
     deleted_title = task.title
     deleted_user_id = task.user_id
     deleted_creator_id = task.creator_id
-    write_audit("deleted", "task", task.id, old_value={"title": task.title, "status": task.status, "comment": delete_comment})
+    write_audit(
+        "deleted", "task", task.id,
+        old_value={"title": task.title, "status": task.status, "comment": delete_comment},
+        scope_owner_ids={task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+    )
     db.session.delete(task)
     db.session.commit()
     record_realtime_event("TASK_DELETED", session["user_id"], "task", id, {"title": deleted_title, "reason": delete_comment, "recipientIds": [deleted_user_id, deleted_creator_id]}, {f"user:{deleted_user_id}", f"user:{deleted_creator_id}"})
