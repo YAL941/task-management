@@ -3,6 +3,14 @@
 {% block title %}Reports - TaskHQ{% endblock %}
 
 {% block content %}
+{# Routes are loaded once when the process starts while templates are read per
+   request, so a running server can hold an older route and read this newer
+   template. Defaulting keeps a missing context variable a blank section
+   instead of an UndefinedError, which would be a 500 for the whole page. #}
+{% set report = report|default({}) %}
+{% set reports = reports|default([]) %}
+{% set date_from = date_from|default('') %}
+{% set date_to = date_to|default('') %}
 <div class="page-head"><div><p class="eyebrow">Performance centre</p><h1>Reports</h1><p class="page-subtitle">A focused view of task health, ownership, and delivery.</p></div><div class="quick-actions"><a href="{{ url_for('export_data', resource='reports', file_format='pdf', date_from=date_from, date_to=date_to) }}" class="secondary-action">Report PDF</a><a href="{{ url_for('export_data', resource='reports', file_format='xlsx', date_from=date_from, date_to=date_to) }}" class="secondary-action">Report Excel</a><a href="{{ url_for('export_data', resource='reports', file_format='csv', date_from=date_from, date_to=date_to) }}" class="secondary-action">Report CSV</a><a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>→</span></a></div></div>
 
 <form method="GET" class="form-grid report-period">

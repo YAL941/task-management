@@ -8,6 +8,18 @@
 <a href="{{ url_for('audit_logs', page=1, per_page=per_page, action=action_filter, entity=entity_filter, entity_id=entity_id_filter, search=search, user_id=actor_filter, result=result_filter, period=period, date_from=date_from, date_to=date_to, sort=field, order=next_order) }}" aria-label="Sort by {{ label }} {{ next_order }}">{{ label }}{% if sort == field %} <span aria-hidden="true">{% if order == 'asc' %}&uarr;{% else %}&darr;{% endif %}</span>{% endif %}</a>
 {%- endmacro %}
 {% block content %}
+{# See templates/reports.html: a route that stops passing a variable must cost
+   a blank section, not a 500 for the page. #}
+{% set logs = logs|default([]) %}
+{% set available_actions = available_actions|default([]) %}
+{% set available_entities = available_entities|default([]) %}
+{% set available_actors = available_actors|default([]) %}
+{% set audit_change_rows = audit_change_rows|default({}) %}
+{% set resource_urls = resource_urls|default({}) %}
+{% set total_items = total_items|default(0) %}
+{% set total_pages = total_pages|default(0) %}
+{% set page = page|default(1) %}
+{% set per_page = per_page|default(25) %}
 <div class="page-head">
     <div>
         <p class="eyebrow">Governance</p>

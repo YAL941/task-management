@@ -11,6 +11,7 @@ depends on.
 from uuid import uuid4
 
 import pytest
+from flask import render_template
 from werkzeug.security import generate_password_hash
 
 from main import (
@@ -463,6 +464,29 @@ def test_every_template_compiles():
             except Exception as error:  # noqa: BLE001 - report every broken template
                 failures.append(f"{name}: {error}")
         assert not failures, "templates failed to compile: " + "; ".join(failures)
+
+
+def test_report_and_audit_pages_render_without_any_context():
+    """A variable the route stopped passing must not become a 500.
+
+    Routes are loaded once when the process starts, while templates are read on
+    every request, so a server left running across a code change can hold an
+    older route and read a newer template. `reports.html` once iterated
+    `report.summary`, which raised `jinja2.UndefinedError` - a 500 for the whole
+    page - for exactly that reason. Both pages now default every iterated
+    variable, and this test renders both pages with nothing but a request context.
+
+    `audit_log_detail.html` is not in the list: it has to show one specific row,
+    so a route that forgets `audit_log` has nothing to render, and its route
+    aborts with 404 instead.
+    """
+    with app.test_request_context("/"):
+        for template in ("reports.html", "audit_logs.html"):
+            try:
+                html = render_template(template)
+            except Exception as error:  # noqa: BLE001 - report the template that broke
+                pytest.fail(f"{template} needs a context variable it does not default: {error}")
+            assert isinstance(html, str) and html.strip()
 
 
 def test_user_screens_and_seeded_accounts(workspace):
