@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Audit event #{{ audit_log.id }} - TaskHQ{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Governance / Audit logs</p>
+    <h1>Audit event #{{ audit_log.id }}</h1>
+    <p class="page-subtitle">Recorded {{ audit_log.created_at }} by {{ actor_name }}.</p>
+  </div>
+  <a class="secondary-action" href="{{ url_for('audit_logs') }}">Back to audit logs</a>
+</div>
+
+<section class="card-surface settings-card">
+  <dl class="form-grid">
+    <div><dt class="form-label">Action</dt><dd>{{ audit_log.action }}</dd></div>
+    <div><dt class="form-label">Result</dt><dd>{{ audit_result|title }}</dd></div>
+    <div><dt class="form-label">Actor</dt><dd>{{ actor_name }}{% if audit_log.user_id %} (#{{ audit_log.user_id }}){% endif %}</dd></div>
+    <div><dt class="form-label">Resource</dt><dd>{% if resource_url %}<a href="{{ resource_url }}">{{ audit_log.entity }} #{{ audit_log.entity_id }}</a>{% else %}{{ audit_log.entity }}{% if audit_log.entity_id %} #{{ audit_log.entity_id }}{% endif %}{% endif %}</dd></div>
+    <div><dt class="form-label">IP address</dt><dd>{{ audit_log.ip_address or '-' }}</dd></div>
+    <div><dt class="form-label">Team scope</dt><dd>{{ audit_log.scope_team_id or '-' }}</dd></div>
+  </dl>
+
+  {% if audit_log.old_value %}
+  <div class="form-section">
+    <strong>Before</strong>
+    <pre style="white-space:pre-wrap; overflow-wrap:anywhere;">{{ audit_log.old_value }}</pre>
+  </div>
+  {% endif %}
+  {% if audit_log.new_value %}
+  <div class="form-section">
+    <strong>After / reason</strong>
+    <pre style="white-space:pre-wrap; overflow-wrap:anywhere;">{{ audit_log.new_value }}</pre>
+  </div>
+  {% endif %}
+  {% if audit_reason %}<div class="form-section"><strong>Reason</strong><p>{{ audit_reason }}</p></div>{% endif %}
+</section>
+{% endblock %}

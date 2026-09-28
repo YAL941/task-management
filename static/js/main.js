@@ -5,7 +5,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const realtime = {
         socket: null,
         seen: new Set(),
+        auditSeen: new Set(),
         sequence: Number(sessionStorage.getItem('taskhq:last-event-sequence') || 0),
+        auditSequence: Number(sessionStorage.getItem('taskhq:last-audit-log-id') || 0),
         setStatus(status, label, detail) {
             if (!realtimeStatus) return;
             realtimeStatus.dataset.realtimeStatus = status;
@@ -22,6 +24,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.dispatchEvent(new Event('taskhq:refresh-notifications'));
             }
         },
+        handleAuditEvent(event) {
+            if (!event?.eventId || realtime.auditSeen.has(event.eventId)) return;
+            realtime.auditSeen.add(event.eventId);
+            realtime.auditSequence = Math.max(realtime.auditSequence, Number(event.sequence || 0));
+            sessionStorage.setItem('taskhq:last-audit-log-id', String(realtime.auditSequence));
+            window.dispatchEvent(new CustomEvent('taskhq:audit-log', { detail: event }));
+        },
         async connect() {
             if (!window.io || !realtimeStatus) return;
             try {
@@ -34,6 +43,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     realtime.socket.emit('sync', { lastEventId: realtime.sequence }, (result) => {
                         if (result?.ok) result.events.forEach((event) => realtime.handleEvent(event));
                     });
+                    if (document.querySelector('[data-audit-stream]')) {
+                        realtime.socket.emit('audit_sync', { lastAuditLogId: realtime.auditSequence }, (result) => {
+                            if (!result?.ok) return;
+                            result.events.forEach((event) => realtime.handleAuditEvent(event));
+                            realtime.auditSequence = Math.max(realtime.auditSequence, Number(result.lastAuditLogId || 0));
+                            sessionStorage.setItem('taskhq:last-audit-log-id', String(realtime.auditSequence));
+                        });
+                    }
                     const taskMatch = window.location.pathname.match(/\/tasks\/(\d+)\/view/);
                     const teamMatch = window.location.pathname.match(/\/teams\/(\d+)$/);
                     if (taskMatch) realtime.socket.emit('join_room', { room: `task:${taskMatch[1]}` });
@@ -43,6 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 realtime.socket.on('disconnect', () => realtime.setStatus('offline', 'Offline', 'Live updates paused'));
                 realtime.socket.on('connect_error', () => realtime.setStatus('reconnecting', 'Reconnecting...', 'Retrying secure connection'));
                 realtime.socket.on('realtime_event', (event) => realtime.handleEvent(event));
+                realtime.socket.on('audit_log_event', (event) => realtime.handleAuditEvent(event));
                 realtime.socket.on('presence', (event) => window.dispatchEvent(new CustomEvent('taskhq:presence', { detail: event })));
                 window.setInterval(() => realtime.socket?.connected && realtime.socket.emit('heartbeat'), 25000);
             } catch (error) {
@@ -112,6 +130,12 @@ document.addEventListener('DOMContentLoaded', () => {
             messageList.append(message);
         }
     });
+
+    window.addEventListener('taskhq:audit-log', () => {
+        const notice = document.querySelector('[data-audit-live-notice]');
+        if (notice) notice.hidden = false;
+    });
+    document.querySelector('[data-audit-refresh]')?.addEventListener('click', () => window.location.reload());
 
     document.querySelectorAll('[data-password-toggle]').forEach((button) => {
         button.addEventListener('click', () => {

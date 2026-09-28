@@ -262,7 +262,13 @@ def audit_scope_scenario():
                     AuditLog.action.in_({"updated", "status_changed"}),
                 ).all()
             }
-            audit_log_ids = set(created_ids["audit_logs"]) | task_audit_ids
+            actor_audit_ids = {
+                audit_log_id
+                for (audit_log_id,) in db.session.query(AuditLog.id).filter(
+                    AuditLog.user_id.in_(created_ids["users"])
+                ).all()
+            }
+            audit_log_ids = set(created_ids["audit_logs"]) | task_audit_ids | actor_audit_ids
             AuditLogScopeOwner.query.filter(AuditLogScopeOwner.audit_log_id.in_(audit_log_ids)).delete(synchronize_session=False)
             AuditLog.query.filter(AuditLog.id.in_(audit_log_ids)).delete(synchronize_session=False)
             Comment.query.filter(Comment.id.in_(created_ids["comments"])).delete(synchronize_session=False)
@@ -419,7 +425,9 @@ def test_task_edit_audits_real_changes_and_skips_noops(audit_scope_scenario):
             "due_date": None,
             "description": None,
         }
-        assert json.loads(edit_log.new_value) == {
+        edited_values = json.loads(edit_log.new_value)
+        assert edited_values.pop("_audit") == {"result": "success"}
+        assert edited_values == {
             "title": "Scope owned task updated",
             "priority": "High",
             "due_date": "2026-10-15",
@@ -458,7 +466,9 @@ def test_task_edit_audits_real_changes_and_skips_noops(audit_scope_scenario):
         status_log = status_logs[-1]
         cleanup_ids["audit_logs"].append(status_log.id)
         assert json.loads(status_log.old_value) == {"status": "Pending"}
-        assert json.loads(status_log.new_value) == {"status": "In Progress"}
+        status_values = json.loads(status_log.new_value)
+        assert status_values.pop("_audit") == {"result": "success"}
+        assert status_values == {"status": "In Progress"}
         assert AuditScopeResolver.resolve_owners(status_log) == {users["creator"], users["assignee"]}
 
 

@@ -25,6 +25,57 @@ the current user's effective grants are available at `/api/me/permissions`.
 Role changes are audited and publish `PERMISSIONS_UPDATED` over the existing
 Socket.IO connection.
 
+## Audit events
+
+The audit log uses the existing `audit_logs` columns. Current event catalog:
+
+| Area | Actions | Entity | Result source |
+| --- | --- | --- | --- |
+| Authentication | `logged_in`, `logged_out`, `login_failed` | `user` | `new_value._audit.result` and `new_value._audit.reason` |
+| Authorization | `access_denied` | requested entity or `request` | `new_value._audit.result` and `new_value._audit.reason` |
+| Users and roles | `created`, `updated`, `deleted`, `ROLE_CREATED`, `ROLE_DELETED`, `ROLE_PERMISSION_UPDATED` | `user` or `role` | Successful persisted change |
+| Tasks | `TASK_VIEWED`, `created`, `TASK_ASSIGNED`, `TASK_REASSIGNED`, `updated`, `status_changed`, `deleted` | `task` | Successful persisted change |
+| Attachments | `ATTACHMENT_UPLOADED`, `ATTACHMENT_DOWNLOADED`, `ATTACHMENT_DELETED`, `ATTACHMENT_UPLOAD_FAILED` | `attachment`, `task` | Success, failed, or denied outcome |
+| Comments | `COMMENT_CREATED` | `task` | Successful persisted change; comment body is not copied into audit metadata |
+| Notifications | `NOTIFICATION_CREATED`, `NOTIFICATION_OPENED`, `NOTIFICATIONS_MARKED_READ` | `notification` | Successful persisted change; message content is not copied |
+| Other tracked changes | `created`, `updated`, `deleted`, `imported`, `toggled` | entity name | Successful persisted change |
+
+`AuditEventService` is the central writer; the existing `write_audit` helper
+delegates to it for compatibility. New outcomes are stored under
+`new_value._audit` to avoid an unapproved schema migration. Existing archive,
+restore, comment-edit, and comment-delete routes are not present and therefore
+are not synthesized by the audit layer.
+
+The audit stream is delivered only to connected users with `audit_logs.view`.
+The `audit_sync` cursor is scoped with the same `ANY`, `TEAM`, or `OWN` rules as
+the audit page; event IDs are stable and clients de-duplicate replayed events
+after reconnect. Audit details and resource links re-check the viewer's current
+scope and resource permission.
+
+### Retention
+
+Audit history is retained indefinitely by default; there is no automatic purge.
+Before enabling deletion, administrators should set a retention period based
+on legal and operational requirements, export or archive records required for
+investigations, and test the purge procedure against the production database.
+No export endpoint is currently implemented.
+
+### Proposed schema change (approval required)
+
+The current `AuditLog` model has no `result` or `reason` columns. For normalized
+filtering and reporting, the proposed additive schema is nullable
+`result VARCHAR(20)` and `reason VARCHAR(255)` columns, with values such as
+`success`, `denied`, and a bounded reason code. Existing rows would remain NULL;
+new events would populate the fields while retaining the JSON values for
+backward compatibility. This is a proposal only: no migration or automatic
+schema change should be run until the database owner approves the column names,
+lengths, allowed values, and rollout/backfill policy.
+
+The pagination query has been checked against SQL Server's
+`OFFSET ... ROWS FETCH FIRST ... ROWS ONLY` syntax. The automated audit suite is
+run against isolated SQLite for data-fixture safety; it does not replace an
+integration run against the deployed SQL Server version and ODBC driver.
+
 ## Quick start
 
 1. Create and activate a virtual environment

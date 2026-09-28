@@ -174,6 +174,7 @@ def test_pagination_query_uses_database_count_limit_and_offset(audit_client):
 
     with app.app_context():
         engine = db.engine
+        is_mssql = engine.dialect.name == "mssql"
         event.listen(engine, "before_cursor_execute", capture_sql)
     try:
         response = audit_client.get("/audit-logs?action=step4_page_probe&page=2&per_page=25")
@@ -183,4 +184,7 @@ def test_pagination_query_uses_database_count_limit_and_offset(audit_client):
 
     assert response.status_code == 200
     assert any("count(" in statement and "audit_logs" in statement for statement in statements)
-    assert any("limit" in statement and "offset" in statement for statement in statements)
+    if is_mssql:
+        assert any("offset" in statement and "fetch first" in statement for statement in statements)
+    else:
+        assert any("limit" in statement and "offset" in statement for statement in statements)

@@ -131,6 +131,26 @@
       <div class="form-section-title">
         <span class="form-number">05</span>
         <div>
+          <strong>Activity timeline</strong>
+          <small>Changes recorded for this task.</small>
+        </div>
+      </div>
+      <div style="display:grid; gap:8px;">
+        {% for activity in activity_logs %}
+        <article style="display:grid; grid-template-columns:minmax(130px, auto) minmax(0, 1fr); gap:10px; padding:10px 12px; border-left:3px solid #0f766e; background:#f8fafc;">
+          <small style="color:var(--muted);">{{ activity.created_at }}</small>
+          <div><strong>{{ users.get(activity.user_id).username if users.get(activity.user_id) else 'System' }}</strong> {{ activity.action }} <span>{{ activity.entity }}</span>{% if activity.new_value %}<div class="muted-cell">{{ activity.new_value }}</div>{% endif %}</div>
+        </article>
+        {% else %}
+        <p class="muted-cell">No task changes recorded yet.</p>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">06</span>
+        <div>
           <strong>Comments</strong>
           <small>Activity recorded against this task.</small>
         </div>

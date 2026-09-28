@@ -14,13 +14,14 @@ from functools import wraps
 from pathlib import Path
 from urllib.request import Request as UrlRequest, urlopen
 
-from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for, abort
+from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for, abort, has_request_context
 
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
 from sqlalchemy import event, func, inspect, or_, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -591,6 +592,7 @@ def validate_uploads(uploads):
 def save_task_attachments(task_id, uploads, uploaded_by):
     saved_paths = []
     attachment_rows = []
+    attachment_digests = []
     task = db.session.get(Task, task_id)
     scope_owner_ids = {task.creator_id, task.user_id} if task else set()
     scope_team_id = task.team_id if task else None
@@ -616,15 +618,19 @@ def save_task_attachments(task_id, uploads, uploaded_by):
             file_size=target.stat().st_size,
             created_at=datetime.now().isoformat(timespec="seconds"),
         ))
-        write_audit(
-            "created",
+        attachment_digests.append(digest)
+    db.session.add_all(attachment_rows)
+    db.session.flush()
+    for attachment, digest in zip(attachment_rows, attachment_digests):
+        AuditEventService.record(
+            "ATTACHMENT_UPLOADED",
             "attachment",
-            None,
-            new_value={"task_id": task_id, "filename": original_name, "sha256": digest},
+            attachment.id,
+            new_value={"task_id": task_id, "filename": attachment.filename, "sha256": digest},
             scope_owner_ids=scope_owner_ids,
             scope_team_id=scope_team_id,
+            result="success",
         )
-    db.session.add_all(attachment_rows)
     return attachment_rows, saved_paths
 
 
@@ -671,7 +677,7 @@ def notify_team_live_meeting(team, meeting):
     }
     created_at = datetime.now().isoformat(timespec="seconds")
     for recipient_id in recipient_ids - existing_recipient_ids:
-        db.session.add(Notification(user_id=recipient_id, message=message, created_at=created_at))
+        create_notification(recipient_id, message, created_at)
 
 
 def reconcile_live_meetings():
@@ -906,6 +912,8 @@ def realtime_connect(auth=None):
     realtime_connections[request.sid] = user_id
     join_room("global")
     join_room(f"user:{user_id}")
+    if AuditScopeResolver.scopes_for_user(user_id):
+        join_room(f"audit:user:{user_id}")
     now = datetime.now().isoformat(timespec="seconds")
     presence = db.session.get(UserPresence, user_id) or UserPresence(user_id=user_id, last_seen_at=now, updated_at=now)
     presence.status = "online"
@@ -973,6 +981,85 @@ def realtime_sync(data):
     return {"ok": True, "events": result, "lastEventId": events[-1].id if events else since_id}
 
 
+def audit_event_payload(audit_log):
+    actor = db.session.get(User, audit_log.user_id) if audit_log.user_id else None
+    result, reason = audit_result_reason(audit_log)
+    return {
+        "sequence": audit_log.id,
+        "eventId": f"audit-{audit_log.id}",
+        "eventType": "AUDIT_LOG_CREATED",
+        "timestamp": audit_log.created_at,
+        "userId": audit_log.user_id,
+        "actorName": actor.username if actor else "System",
+        "entityType": audit_log.entity,
+        "entityId": audit_log.entity_id,
+        "action": audit_log.action,
+        "result": result,
+        "reason": reason,
+        "oldValue": audit_log.old_value,
+        "newValue": audit_log.new_value,
+        "ipAddress": audit_log.ip_address,
+    }
+
+
+def audit_result_reason(audit_log):
+    try:
+        payload = json.loads(audit_log.new_value or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    metadata = payload.get("_audit", {}) if isinstance(payload, dict) else {}
+    action = (audit_log.action or "").lower()
+    result = metadata.get("result") if isinstance(metadata, dict) else None
+    if not result:
+        result = "denied" if action in {"access_denied", "login_failed"} else "failed" if action == "attachment_upload_failed" else "success"
+    reason = metadata.get("reason") if isinstance(metadata, dict) else None
+    return result, reason
+
+
+def audit_log_visible_to_user(audit_log, user_id):
+    scopes = AuditScopeResolver.scopes_for_user(user_id)
+    if not scopes:
+        return False
+    return AuditScopeResolver.apply_to_query(
+        AuditLog.query.filter(AuditLog.id == audit_log.id), user_id, scopes
+    ).first() is not None
+
+
+def publish_committed_audit_logs(audit_log_ids):
+    with app.app_context():
+        for audit_log_id in audit_log_ids:
+            audit_log = db.session.get(AuditLog, audit_log_id)
+            if not audit_log:
+                continue
+            message = audit_event_payload(audit_log)
+            for user_id in set(realtime_connections.values()):
+                if audit_log_visible_to_user(audit_log, user_id):
+                    socketio.emit("audit_log_event", message, to=f"audit:user:{user_id}")
+
+
+@socketio.on("audit_sync")
+def audit_realtime_sync(data):
+    user_id = realtime_connections.get(request.sid)
+    scopes = AuditScopeResolver.scopes_for_user(user_id) if user_id else None
+    if not scopes:
+        return {"ok": False, "error": "Unauthorized"}
+    try:
+        since_id = max(0, int((data or {}).get("lastAuditLogId", 0) or 0))
+    except (TypeError, ValueError):
+        since_id = 0
+    query = AuditScopeResolver.apply_to_query(AuditLog.query, user_id, scopes)
+    logs = query.filter(AuditLog.id > since_id).order_by(AuditLog.id.asc()).limit(200).all()
+    if len(logs) == 200:
+        last_audit_log_id = logs[-1].id
+    else:
+        last_audit_log_id = db.session.query(func.max(AuditLog.id)).scalar() or since_id
+    return {
+        "ok": True,
+        "events": [audit_event_payload(audit_log) for audit_log in logs],
+        "lastAuditLogId": last_audit_log_id,
+    }
+
+
 @socketio.on("disconnect")
 def realtime_disconnect():
     user_id = realtime_connections.pop(request.sid, None)
@@ -988,28 +1075,128 @@ def realtime_disconnect():
     socketio.emit("presence", {"eventType": "USER_OFFLINE", "userId": user_id, "status": "offline", "timestamp": now}, to="global")
 
 
-def write_audit(action, entity, entity_id=None, old_value=None, new_value=None,
-                scope_owner_ids=None, scope_team_id=None):
-    audit_log = AuditLog(
-        user_id=session.get("user_id"),
-        action=action,
-        entity=entity,
-        entity_id=entity_id,
-        old_value=json.dumps(old_value, default=str) if old_value is not None else None,
-        new_value=json.dumps(new_value, default=str) if new_value is not None else None,
-        ip_address=request.headers.get("X-Forwarded-For", request.remote_addr),
-        created_at=datetime.now().isoformat(timespec="seconds"),
-        scope_team_id=scope_team_id,
-    )
-    db.session.add(audit_log)
-    db.session.flush()
-    owner_ids = {owner_id for owner_id in (scope_owner_ids or ()) if owner_id is not None}
-    if owner_ids:
-        db.session.add_all(
-            AuditLogScopeOwner(audit_log_id=audit_log.id, owner_user_id=owner_id)
-            for owner_id in owner_ids
+AUDIT_EVENT_CATALOG = {
+    "TASK_VIEWED": {"entity": "task", "result": "success"},
+    "TASK_ASSIGNED": {"entity": "task", "result": "success"},
+    "TASK_REASSIGNED": {"entity": "task", "result": "success"},
+    "ATTACHMENT_UPLOADED": {"entity": "attachment", "result": "success"},
+    "ATTACHMENT_DOWNLOADED": {"entity": "attachment", "result": "success"},
+    "ATTACHMENT_DELETED": {"entity": "attachment", "result": "success"},
+    "ATTACHMENT_UPLOAD_FAILED": {"entity": "task", "result": "failed"},
+    "COMMENT_CREATED": {"entity": "task", "result": "success"},
+    "NOTIFICATION_CREATED": {"entity": "notification", "result": "success"},
+    "NOTIFICATION_OPENED": {"entity": "notification", "result": "success"},
+    "NOTIFICATIONS_MARKED_READ": {"entity": "notification", "result": "success"},
+    "ACCESS_DENIED": {"entity": "request", "result": "denied"},
+    "access_denied": {"entity": "request", "result": "denied"},
+    "TASK_CREATED": {"entity": "task", "result": "success"},
+    "TASK_UPDATED": {"entity": "task", "result": "success"},
+    "TASK_STATUS_CHANGED": {"entity": "task", "result": "success"},
+    "TASK_DELETED": {"entity": "task", "result": "success"},
+    "USER_CREATED": {"entity": "user", "result": "success"},
+    "USER_UPDATED": {"entity": "user", "result": "success"},
+    "USER_DELETED": {"entity": "user", "result": "success"},
+    "ROLE_CREATED": {"entity": "role", "result": "success"},
+    "ROLE_UPDATED": {"entity": "role", "result": "success"},
+    "ROLE_DELETED": {"entity": "role", "result": "success"},
+    "ROLE_PERMISSION_UPDATED": {"entity": "role", "result": "success"},
+    "logged_in": {"entity": "user", "result": "success"},
+    "logged_out": {"entity": "user", "result": "success"},
+    "login_failed": {"entity": "user", "result": "denied"},
+    "status_changed": {"entity": "task", "result": "success"},
+}
+
+
+class AuditEventService:
+    @staticmethod
+    def record(action, entity, entity_id=None, old_value=None, new_value=None,
+               scope_owner_ids=None, scope_team_id=None, actor_user_id=None,
+               actor_from_session=True, result=None, reason=None):
+        event_definition = AUDIT_EVENT_CATALOG.get(action, {})
+        result = result or event_definition.get("result") or "success"
+        entity = entity or event_definition.get("entity", "request")
+        if result or reason:
+            payload = dict(new_value) if isinstance(new_value, dict) else ({"value": new_value} if new_value is not None else {})
+            payload["_audit"] = {"result": result}
+            if reason:
+                payload["_audit"]["reason"] = reason
+            new_value = payload
+        actor_id = session.get("user_id") if actor_from_session and has_request_context() else actor_user_id
+        audit_log = AuditLog(
+            user_id=actor_id,
+            action=action,
+            entity=entity,
+            entity_id=entity_id,
+            old_value=json.dumps(old_value, default=str) if old_value is not None else None,
+            new_value=json.dumps(new_value, default=str) if new_value is not None else None,
+            ip_address=request.headers.get("X-Forwarded-For", request.remote_addr) if has_request_context() else None,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            scope_team_id=scope_team_id,
         )
-    return audit_log
+        db.session.add(audit_log)
+        db.session.flush()
+        db.session.info.setdefault("pending_audit_log_ids", []).append(audit_log.id)
+        owner_ids = {owner_id for owner_id in (scope_owner_ids or ()) if owner_id is not None}
+        if owner_ids:
+            db.session.add_all(
+                AuditLogScopeOwner(audit_log_id=audit_log.id, owner_user_id=owner_id)
+                for owner_id in owner_ids
+            )
+        return audit_log
+
+
+def write_audit(action, entity, entity_id=None, old_value=None, new_value=None,
+        scope_owner_ids=None, scope_team_id=None, actor_user_id=None,
+        actor_from_session=True, result=None, reason=None):
+    return AuditEventService.record(
+        action,
+        entity,
+        entity_id,
+        old_value=old_value,
+        new_value=new_value,
+        scope_owner_ids=scope_owner_ids,
+        scope_team_id=scope_team_id,
+        actor_user_id=actor_user_id,
+        actor_from_session=actor_from_session,
+        result=result,
+        reason=reason,
+    )
+
+
+def record_access_denial(reason, entity=None, entity_id=None):
+    AuditEventService.record(
+        "access_denied",
+        entity or "request",
+        entity_id,
+        new_value={"path": request.path},
+        scope_owner_ids={session.get("user_id")} if session.get("user_id") else None,
+        actor_user_id=session.get("user_id"),
+        actor_from_session=False,
+        result="denied",
+        reason=reason,
+    )
+    db.session.commit()
+
+
+def create_notification(user_id, message, created_at=None, scope_team_id=None):
+    notification = Notification(
+        user_id=user_id,
+        message=message,
+        created_at=created_at or datetime.now().isoformat(timespec="seconds"),
+    )
+    db.session.add(notification)
+    db.session.flush()
+    category = "team" if message.startswith("team:") or message.startswith("team_task:") else "task" if "task" in message.lower() else "system"
+    AuditEventService.record(
+        "NOTIFICATION_CREATED",
+        "notification",
+        notification.id,
+        new_value={"recipient_user_id": user_id, "category": category},
+        scope_owner_ids={user_id},
+        scope_team_id=scope_team_id,
+        result="success",
+    )
+    return notification
 
 
 class AuditScopeResolver:
@@ -1053,6 +1240,21 @@ class AuditScopeResolver:
         if not visibility:
             return query.filter(AuditLog.id.in_([]))
         return query.filter(or_(*visibility))
+
+
+@event.listens_for(Session, "after_commit")
+def publish_audit_logs_after_commit(session):
+    audit_log_ids = session.info.pop("pending_audit_log_ids", [])
+    if audit_log_ids:
+        if db.engine.dialect.name == "sqlite":
+            publish_committed_audit_logs(audit_log_ids)
+        else:
+            socketio.start_background_task(publish_committed_audit_logs, audit_log_ids)
+
+
+@event.listens_for(Session, "after_rollback")
+def discard_rolled_back_audit_logs(session):
+    session.info.pop("pending_audit_log_ids", None)
 
 
 def parse_import_file(upload):
@@ -1109,6 +1311,7 @@ def login_required(view):
     @wraps(view)
     def wrapped_view(*args, **kwargs):
         if not session.get("user_id"):
+            record_access_denial("authentication_required")
             flash("Please sign in to continue.", "danger")
             return redirect(url_for("login"))
         return view(*args, **kwargs)
@@ -1131,6 +1334,7 @@ def admin_required(view):
     @login_required
     def wrapped_view(*args, **kwargs):
         if not has_permission(session.get("user_id"), "permissions.manage"):
+            record_access_denial("permission_denied", "permission")
             flash("Administrator permission is required.", "danger")
             return redirect(url_for("tasks"))
         return view(*args, **kwargs)
@@ -1334,7 +1538,7 @@ def run_automation_once():
             if not recipient:
                 continue
             message = f"Automation '{rule.name}' matched task: {task.title}"
-            db.session.add(Notification(user_id=recipient.id, message=message, created_at=datetime.now().isoformat(timespec="seconds")))
+            create_notification(recipient.id, message, datetime.now().isoformat(timespec="seconds"))
             if rule.action == "email":
                 send_email_notification(recipient.email, rule.name, message, recipient.id)
             fired += 1
@@ -1357,8 +1561,18 @@ def login():
             session.clear()
             session.update(user_id=user.id, username=user.username, role=user.role or "User")
             get_csrf_token()
+            write_audit("logged_in", "user", user.id, new_value={}, result="success")
+            db.session.commit()
             flash("Logged in successfully.", "success")
             return redirect(url_for("tasks"))
+        write_audit(
+            "login_failed", "user", user.id if user else None,
+            new_value={},
+            actor_from_session=False,
+            result="denied",
+            reason="invalid_credentials",
+        )
+        db.session.commit()
         flash("Invalid username or password.", "danger")
     return render_template("login.html")
 
@@ -1369,6 +1583,9 @@ def logout():
     if not valid_csrf():
         flash("Invalid request. Please try again.", "danger")
         return redirect(url_for("tasks"))
+    user_id = session.get("user_id")
+    write_audit("logged_out", "user", user_id, new_value={}, result="success")
+    db.session.commit()
     session.clear()
     flash("Logged out successfully.", "success")
     return redirect(url_for("login"))
@@ -1379,7 +1596,17 @@ def logout():
 def mark_notifications_read():
     if not valid_csrf():
         return {"ok": False, "error": "Invalid request"}, 400
-    Notification.query.filter_by(user_id=session["user_id"], is_read=False).update({"is_read": True})
+    unread_ids = [row.id for row in Notification.query.filter_by(user_id=session["user_id"], is_read=False).all()]
+    if unread_ids:
+        Notification.query.filter(Notification.id.in_(unread_ids)).update({"is_read": True}, synchronize_session=False)
+        AuditEventService.record(
+            "NOTIFICATIONS_MARKED_READ",
+            "notification",
+            None,
+            new_value={"count": len(unread_ids)},
+            scope_owner_ids={session["user_id"]},
+            result="success",
+        )
     db.session.commit()
     return {"ok": True}
 
@@ -1414,7 +1641,17 @@ def open_notification(notification_id):
     if not notification:
         return redirect(url_for("tasks"))
 
+    was_read = bool(notification.is_read)
     notification.is_read = True
+    AuditEventService.record(
+        "NOTIFICATION_OPENED",
+        "notification",
+        notification.id,
+        old_value={"is_read": was_read},
+        new_value={"recipient_user_id": notification.user_id, "is_read": True},
+        scope_owner_ids={notification.user_id},
+        result="success",
+    )
     db.session.commit()
     message = notification.message or ""
 
@@ -1455,17 +1692,29 @@ def task_view(task_id):
     task = db.session.get(Task, task_id)
     member_team_ids = {team_id for (team_id,) in db.session.query(TeamMember.team_id).filter_by(user_id=session["user_id"]).all()}
     if not task or not has_permission(session["user_id"], "tasks.view", task) or (not can_access_task(session["user_id"], task) and task.team_id not in member_team_ids):
+        record_access_denial("task_view_forbidden", "task", task.id if task else task_id)
         flash("You do not have access to this task.", "danger")
         return redirect(url_for("tasks"))
+    AuditEventService.record(
+        "TASK_VIEWED",
+        "task",
+        task.id,
+        scope_owner_ids={task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+        result="success",
+    )
+    db.session.commit()
     detail = Detail.query.filter_by(task_id=task.id).first()
     comments = Comment.query.filter_by(task_id=task.id).order_by(Comment.id.asc()).all()
     attachments = Attachment.query.filter_by(task_id=task.id).order_by(Attachment.id.asc()).all()
+    activity_logs = AuditLog.query.filter_by(entity="task", entity_id=task.id).order_by(AuditLog.id.desc()).limit(100).all()
     users = {user.id: user for user in User.query.order_by(User.username).all()}
     return render_template(
         "task_details.html",
         task=task,
         detail=detail,
         comments=comments,
+        activity_logs=activity_logs,
         users=users,
         attachments=attachments,
         can_delete_attachments=has_permission(session["user_id"], "attachments.delete", task),
@@ -1493,6 +1742,7 @@ def preview_attachment(attachment_id):
     attachment = db.session.get(Attachment, attachment_id)
     task = db.session.get(Task, attachment.task_id) if attachment else None
     if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.view", task):
+        record_access_denial("attachment_preview_forbidden", "attachment", attachment_id)
         abort(403)
     if not attachment_supported_for_preview(attachment):
         abort(404)
@@ -1508,10 +1758,21 @@ def download_attachment(attachment_id):
     attachment = db.session.get(Attachment, attachment_id)
     task = db.session.get(Task, attachment.task_id) if attachment else None
     if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.view", task):
+        record_access_denial("attachment_download_forbidden", "attachment", attachment_id)
         abort(403)
     target = storage_path(attachment.storage_key)
     if not target.is_file():
         abort(404)
+    AuditEventService.record(
+        "ATTACHMENT_DOWNLOADED",
+        "attachment",
+        attachment.id,
+        new_value={"task_id": task.id, "filename": attachment.filename},
+        scope_owner_ids={task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+        result="success",
+    )
+    db.session.commit()
     return send_file(target, as_attachment=True, download_name=attachment.filename, mimetype=attachment.mime_type or "application/octet-stream")
 
 
@@ -1520,6 +1781,7 @@ def download_attachment(attachment_id):
 def upload_task_attachments(task_id):
     task = db.session.get(Task, task_id)
     if not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.upload", task):
+        record_access_denial("attachment_upload_forbidden", "task", task_id)
         abort(403)
     if not valid_csrf():
         flash("Invalid request. Please try again.", "danger")
@@ -1531,6 +1793,17 @@ def upload_task_attachments(task_id):
         db.session.commit()
     except ValueError as error:
         db.session.rollback()
+        AuditEventService.record(
+            "ATTACHMENT_UPLOAD_FAILED",
+            "task",
+            task.id,
+            new_value={"result": "failed"},
+            scope_owner_ids={task.creator_id, task.user_id},
+            scope_team_id=task.team_id,
+            result="failed",
+            reason="validation_failed",
+        )
+        db.session.commit()
         flash(str(error), "danger")
         return redirect(url_for("task_view", task_id=task_id))
     except Exception:
@@ -1551,11 +1824,21 @@ def delete_attachment(attachment_id):
     attachment = db.session.get(Attachment, attachment_id)
     task = db.session.get(Task, attachment.task_id) if attachment else None
     if not attachment or not task or not can_access_task(session["user_id"], task) or not has_permission(session["user_id"], "attachments.delete", task):
+        record_access_denial("attachment_delete_forbidden", "attachment", attachment_id)
         abort(403)
     if not valid_csrf():
         return {"ok": False, "error": "Invalid request"}, 400
     storage_key = attachment.storage_key
     filename = attachment.filename
+    AuditEventService.record(
+        "ATTACHMENT_DELETED",
+        "attachment",
+        attachment.id,
+        old_value={"task_id": task.id, "filename": filename},
+        scope_owner_ids={task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+        result="success",
+    )
     db.session.delete(attachment)
     db.session.commit()
     remove_storage_file(storage_key)
@@ -1711,11 +1994,12 @@ def teams():
                     flash("This user is already a team member.", "warning")
                 else:
                     db.session.add(TeamMember(team_id=team.id, user_id=member.id, created_at=datetime.now().isoformat(timespec="seconds")))
-                    db.session.add(Notification(
-                        user_id=member.id,
-                        message=f"team:{team.id}: You were added to {team.name}.",
-                        created_at=datetime.now().isoformat(timespec="seconds"),
-                    ))
+                    create_notification(
+                        member.id,
+                        f"team:{team.id}: You were added to {team.name}.",
+                        datetime.now().isoformat(timespec="seconds"),
+                        scope_team_id=team.id,
+                    )
                     db.session.commit()
                     flash("Team member added.", "success")
             return redirect(url_for("teams"))
@@ -1974,11 +2258,12 @@ def team_detail(team_id):
                         user_id=member_user.id,
                         created_at=datetime.now().isoformat(timespec="seconds"),
                     ))
-                    db.session.add(Notification(
-                        user_id=member_user.id,
-                        message=f"team:{team.id}: You were added to {team.name}.",
-                        created_at=datetime.now().isoformat(timespec="seconds"),
-                    ))
+                    create_notification(
+                        member_user.id,
+                        f"team:{team.id}: You were added to {team.name}.",
+                        datetime.now().isoformat(timespec="seconds"),
+                        scope_team_id=team.id,
+                    )
                 db.session.commit()
                 if is_async_request:
                     return {
@@ -1998,11 +2283,12 @@ def team_detail(team_id):
                 flash("The team leader cannot be removed from the team.", "danger")
             else:
                 db.session.delete(member_row)
-                db.session.add(Notification(
-                    user_id=member_id,
-                    message=f"team:{team.id}: You were removed from {team.name}.",
-                    created_at=datetime.now().isoformat(timespec="seconds"),
-                ))
+                create_notification(
+                    member_id,
+                    f"team:{team.id}: You were removed from {team.name}.",
+                    datetime.now().isoformat(timespec="seconds"),
+                    scope_team_id=team.id,
+                )
                 db.session.commit()
                 flash("Team member removed.", "success")
             return redirect(url_for("team_detail", team_id=team.id))
@@ -2100,10 +2386,22 @@ def team_detail(team_id):
             db.session.flush()
             db.session.add(Detail(task_id=task.id, description=request.form.get("description", "").strip(), updated_at=datetime.now().isoformat(timespec="minutes")))
             if assignee_id != session["user_id"]:
-                db.session.add(Notification(user_id=assignee_id, message=f"team_task:{task.id}: New team task assigned: {title}", created_at=datetime.now().isoformat(timespec="minutes")))
+                create_notification(
+                    assignee_id,
+                    f"team_task:{task.id}: New team task assigned: {title}",
+                    datetime.now().isoformat(timespec="minutes"),
+                    scope_team_id=team.id,
+                )
             write_audit(
                 "created", "task", task.id,
                 new_value={"team_id": team.id, "title": title, "assignee": assignee_id},
+                scope_owner_ids={task.creator_id, task.user_id},
+                scope_team_id=task.team_id,
+            )
+            write_audit(
+                "TASK_ASSIGNED", "task", task.id,
+                old_value={"assignee_id": None},
+                new_value={"assignee_id": assignee_id},
                 scope_owner_ids={task.creator_id, task.user_id},
                 scope_team_id=task.team_id,
             )
@@ -2127,11 +2425,12 @@ def team_detail(team_id):
                 if member.id == session["user_id"]:
                     continue
                 preview = body[:80] + ("..." if len(body) > 80 else "")
-                db.session.add(Notification(
-                    user_id=member.id,
-                    message=f"team:{team.id}: {sender.username if sender else 'Someone'} posted in {team.name}: {preview}",
-                    created_at=datetime.now().isoformat(timespec="seconds"),
-                ))
+                create_notification(
+                    member.id,
+                    f"team:{team.id}: {sender.username if sender else 'Someone'} posted in {team.name}: {preview}",
+                    datetime.now().isoformat(timespec="seconds"),
+                    scope_team_id=team.id,
+                )
             db.session.commit()
             record_realtime_event("COMMENT_CREATED", session["user_id"], "team", team.id, {"messageId": team_message.id, "body": team_message.body, "username": sender.username if sender else "User"}, {f"team:{team.id}"})
             if is_async_request:
@@ -2328,13 +2627,40 @@ def users():
             elif is_super_admin(user.id) and not is_super_admin(session["user_id"]):
                 flash("Only a Super Admin can delete a Super Admin account.", "danger")
             else:
-                Task.query.filter_by(user_id=user.id).update({"user_id": None})
+                write_audit(
+                    "deleted", "user", user.id,
+                    old_value={"username": user.username, "role": user.role},
+                    scope_owner_ids={user.id},
+                    result="success",
+                )
+                assigned_tasks = Task.query.filter_by(user_id=user.id).all()
+                for assigned_task in assigned_tasks:
+                    AuditEventService.record(
+                        "TASK_REASSIGNED",
+                        "task",
+                        assigned_task.id,
+                        old_value={"assignee_id": user.id},
+                        new_value={"assignee_id": None, "reason": "assignee_deleted"},
+                        scope_owner_ids={assigned_task.creator_id, assigned_task.user_id},
+                        scope_team_id=assigned_task.team_id,
+                        result="success",
+                        reason="assignee_deleted",
+                    )
+                    assigned_task.user_id = None
                 Notification.query.filter_by(user_id=user.id).delete()
                 db.session.delete(user)
                 db.session.commit()
                 flash("User deleted successfully.", "success")
             return redirect(url_for("users", view=view))
         if user:
+            old_assigned_roles = sorted(role.name for role in user_roles(user))
+            old_user_values = {
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+            }
             user.first_name = request.form.get("first_name", user.first_name).strip()
             user.last_name = request.form.get("last_name", user.last_name).strip()
             user.phone = request.form.get("phone", user.phone)
@@ -2357,6 +2683,22 @@ def users():
                 db.session.rollback()
                 flash(roles_error, "danger")
                 return redirect(url_for("users", view=view))
+            new_user_values = {
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "assigned_roles": sorted(role.name for role in user_roles(user)),
+            }
+            old_user_values["assigned_roles"] = old_assigned_roles
+            if old_user_values != new_user_values:
+                write_audit(
+                    "updated", "user", user.id,
+                    old_value=old_user_values,
+                    new_value=new_user_values,
+                    scope_owner_ids={user.id},
+                )
             db.session.commit()
             record_realtime_event("PERMISSIONS_UPDATED", session["user_id"], "user", user.id, {"reason": "roles_changed"}, {f"user:{user.id}"})
             flash("User updated successfully.", "success")
@@ -2387,6 +2729,11 @@ def users():
             db.session.rollback()
             flash(roles_error, "danger")
             return redirect(url_for("users", view=view))
+        write_audit(
+            "created", "user", new_user.id,
+            new_value={"username": new_user.username, "role": new_user.role},
+            scope_owner_ids={new_user.id},
+        )
         db.session.commit()
         flash("User added successfully.", "success")
         return redirect(url_for("users", view=view))
@@ -2500,10 +2847,17 @@ def add_task():
     db.session.add(Detail(task_id=task.id, description=request.form.get("description", "").strip(), updated_at=datetime.now().isoformat(timespec="minutes")))
     attachment_rows, saved_paths = save_task_attachments(task.id, uploads, session["user_id"])
     if assigned_user_id != session["user_id"]:
-        db.session.add(Notification(user_id=assigned_user_id, message=f"New task assigned: {title}", created_at=datetime.now().isoformat(timespec="minutes")))
+        create_notification(assigned_user_id, f"New task assigned: {title}", datetime.now().isoformat(timespec="minutes"), scope_team_id=team_id)
     write_audit(
         "created", "task", task.id,
         new_value={"title": title, "assignee": assigned_user_id},
+        scope_owner_ids={task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+    )
+    write_audit(
+        "TASK_ASSIGNED", "task", task.id,
+        old_value={"assignee_id": None},
+        new_value={"assignee_id": assigned_user_id},
         scope_owner_ids={task.creator_id, task.user_id},
         scope_team_id=task.team_id,
     )
@@ -2538,6 +2892,7 @@ def update_status(id, new_status):
         return redirect(url_for("tasks"))
     task = db.session.get(Task, id)
     if not task or not has_permission(session["user_id"], "tasks.change_status", task):
+        record_access_denial("task_status_change_forbidden", "task", task.id if task else id)
         flash("You do not have permission to update this task.", "danger")
         return redirect(url_for("tasks"))
     comment_body = request.form.get("comment", "").strip()
@@ -2559,10 +2914,11 @@ def update_status(id, new_status):
         db.session.add(comment)
         db.session.flush()
         write_audit(
-            "created", "comment", comment.id,
-            new_value={"task_id": task.id},
+            "COMMENT_CREATED", "task", task.id,
+            new_value={"comment_id": comment.id},
             scope_owner_ids={comment.user_id, task.creator_id, task.user_id},
             scope_team_id=task.team_id,
+            result="success",
         )
     if status_changed:
         write_audit(
@@ -2720,6 +3076,7 @@ def analytics():
 @login_required
 def audit_logs():
     if not has_permission(session["user_id"], "audit_logs.view"):
+        record_access_denial("permission_denied", "audit_logs")
         flash("You do not have permission to view audit logs.", "danger")
         return redirect(url_for("tasks"))
 
@@ -2733,11 +3090,27 @@ def audit_logs():
     action_filter = (request.args.get("action") or "").strip()
     entity_filter = (request.args.get("entity") or "").strip()
     search = (request.args.get("search") or "").strip()
+    actor_filter = request.args.get("user_id", type=int)
+    result_filter = (request.args.get("result") or "").strip().lower()
+    date_from = (request.args.get("date_from") or "").strip()
+    date_to = (request.args.get("date_to") or "").strip()
 
     if action_filter:
         query = query.filter(AuditLog.action.ilike(f"%{action_filter}%"))
     if entity_filter:
         query = query.filter(AuditLog.entity.ilike(f"%{entity_filter}%"))
+    if actor_filter:
+        query = query.filter(AuditLog.user_id == actor_filter)
+    if result_filter == "denied":
+        query = query.filter(AuditLog.action.in_(["access_denied", "login_failed"]))
+    elif result_filter == "failed":
+        query = query.filter(AuditLog.action == "ATTACHMENT_UPLOAD_FAILED")
+    elif result_filter == "success":
+        query = query.filter(AuditLog.action.notin_(["access_denied", "login_failed", "ATTACHMENT_UPLOAD_FAILED"]))
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_from):
+        query = query.filter(AuditLog.created_at >= date_from + "T00:00:00")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_to):
+        query = query.filter(AuditLog.created_at <= date_to + "T23:59:59")
     if search:
         query = query.filter(
             or_(
@@ -2795,9 +3168,19 @@ def audit_logs():
         row[0] for row in scoped_query.with_entities(AuditLog.entity).distinct()
         .order_by(AuditLog.entity.asc()).all() if row[0]
     ]
+    available_actor_ids = [
+        row[0] for row in scoped_query.with_entities(AuditLog.user_id).distinct()
+        .order_by(AuditLog.user_id.asc()).all() if row[0] is not None
+    ]
+    available_actors = [
+        (user.id, user.username)
+        for user in User.query.filter(User.id.in_(available_actor_ids)).order_by(User.username).all()
+    ] if available_actor_ids else []
     actor_names = {}
     for user in User.query.filter(User.id.in_([log.user_id for log in logs if log.user_id])).all():
         actor_names[user.id] = user.username
+    resource_urls = {log.id: audit_resource_url(log, session["user_id"]) for log in logs}
+    audit_outcomes = {log.id: audit_result_reason(log) for log in logs}
     notifications, unread_count = get_shared_data()
     return render_template(
         "audit_logs.html",
@@ -2807,6 +3190,10 @@ def audit_logs():
         action_filter=action_filter,
         entity_filter=entity_filter,
         search=search,
+        actor_filter=actor_filter,
+        result_filter=result_filter,
+        date_from=date_from,
+        date_to=date_to,
         current_page=page,
         per_page=per_page,
         total_items=total_items,
@@ -2820,8 +3207,50 @@ def audit_logs():
         page_numbers=range(max(1, page - 2), min(total_pages, page + 2) + 1),
         available_actions=available_actions,
         available_entities=available_entities,
+        available_actors=available_actors,
         actor_names=actor_names,
+        resource_urls=resource_urls,
+        audit_outcomes=audit_outcomes,
     )
+
+
+@app.route("/audit-logs/<int:audit_log_id>")
+@login_required
+def audit_log_detail(audit_log_id):
+    scopes = AuditScopeResolver.scopes_for_user(session["user_id"])
+    if not scopes:
+        abort(403)
+    audit_log = AuditScopeResolver.apply_to_query(
+        AuditLog.query.filter(AuditLog.id == audit_log_id), session["user_id"], scopes
+    ).first_or_404()
+    actor = db.session.get(User, audit_log.user_id) if audit_log.user_id else None
+    resource_url = audit_resource_url(audit_log, session["user_id"])
+    result, reason = audit_result_reason(audit_log)
+    return render_template(
+        "audit_log_detail.html",
+        audit_log=audit_log,
+        actor_name=actor.username if actor else "System",
+        resource_url=resource_url,
+        audit_result=result,
+        audit_reason=reason,
+        notifications=get_shared_data()[0],
+        unread_count=get_shared_data()[1],
+    )
+
+
+def audit_resource_url(audit_log, user_id):
+    if audit_log.entity == "task" and audit_log.entity_id:
+        task = db.session.get(Task, audit_log.entity_id)
+        if task and has_permission(user_id, "tasks.view", task) and can_access_task(user_id, task):
+            return url_for("task_view", task_id=task.id)
+    elif audit_log.entity == "team" and audit_log.entity_id:
+        team = db.session.get(Team, audit_log.entity_id)
+        user = db.session.get(User, user_id)
+        if team and user and (user.role in {"Admin", "Manager"} or TeamMember.query.filter_by(team_id=team.id, user_id=user_id).first()):
+            return url_for("team_detail", team_id=team.id)
+    elif audit_log.entity == "user" and has_permission(user_id, "users.view"):
+        return url_for("users")
+    return None
 
 
 @app.route("/tasks/<int:id>/comments", methods=["GET", "POST"])
@@ -2836,6 +3265,7 @@ def task_comments(id):
             flash("Invalid request. Please try again.", "danger")
         else:
             if not has_permission(session["user_id"], "comments.create", task):
+                record_access_denial("comment_create_forbidden", "task", task.id)
                 flash("You do not have permission to create comments.", "danger")
                 return redirect(url_for("task_comments", id=id))
             body = request.form.get("body", "").strip()
@@ -2843,16 +3273,22 @@ def task_comments(id):
                 comment = Comment(task_id=id, user_id=session["user_id"], body=body, created_at=datetime.now().isoformat(timespec="seconds"))
                 db.session.add(comment)
                 write_audit(
-                    "created", "comment", comment.id,
-                    new_value={"task_id": id},
+                    "COMMENT_CREATED", "task", task.id,
+                    new_value={"comment_id": comment.id},
                     scope_owner_ids={comment.user_id, task.creator_id, task.user_id},
                     scope_team_id=task.team_id,
+                    result="success",
                 )
                 mentions = set(re.findall(r"@([A-Za-z0-9_.-]+)", body))
                 for username in mentions:
                     mentioned = User.query.filter(func.lower(User.username) == username.lower()).first()
                     if mentioned and mentioned.id != session["user_id"]:
-                        db.session.add(Notification(user_id=mentioned.id, message=f"You were mentioned in a task comment: {task.title}", created_at=datetime.now().isoformat(timespec="seconds")))
+                        create_notification(
+                            mentioned.id,
+                            f"You were mentioned in a task comment: {task.title}",
+                            datetime.now().isoformat(timespec="seconds"),
+                            scope_team_id=task.team_id,
+                        )
                 db.session.commit()
                 record_realtime_event("COMMENT_CREATED", session["user_id"], "task", task.id, {"commentId": comment.id, "body": comment.body}, {f"task:{task.id}", f"user:{task.user_id}", f"user:{task.creator_id}"})
                 flash("Comment added.", "success")
@@ -2998,6 +3434,7 @@ def export_data(resource, file_format):
 def edit_task(id):
     task = db.session.get(Task, id)
     if not task or not has_permission(session["user_id"], "tasks.edit", task):
+        record_access_denial("task_edit_forbidden", "task", task.id if task else id)
         flash("Only the task sender can edit this task.", "danger")
         return redirect(url_for("tasks"))
     detail = Detail.query.filter_by(task_id=id).first()
@@ -3055,6 +3492,7 @@ def delete_task(id):
         return redirect(url_for("tasks"))
     task = db.session.get(Task, id)
     if not task or not has_permission(session["user_id"], "tasks.delete", task):
+        record_access_denial("task_delete_forbidden", "task", task.id if task else id)
         flash("Only the task sender can recall this task.", "danger")
         return redirect(url_for("tasks"))
     delete_comment = request.form.get("comment", "").strip()
@@ -3067,9 +3505,11 @@ def delete_task(id):
     deleted_creator_id = task.creator_id
     write_audit(
         "deleted", "task", task.id,
-        old_value={"title": task.title, "status": task.status, "comment": delete_comment},
+        old_value={"title": task.title, "status": task.status},
         scope_owner_ids={task.creator_id, task.user_id},
         scope_team_id=task.team_id,
+        result="success",
+        reason=delete_comment,
     )
     db.session.delete(task)
     db.session.commit()
