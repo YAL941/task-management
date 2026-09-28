@@ -72,8 +72,8 @@ Every key below is checked by a route and refuses with a recorded
 | Key | Enforced at |
 | --- | --- |
 | `tasks.view` | `/tasks`, `/tasks/<id>/view` |
-| `tasks.create` | `/add_task` |
-| `tasks.edit`, `tasks.edit_own` | `/edit_task/<id>` |
+| `tasks.create` | `/add_task`; also what puts a task into a team on creation |
+| `tasks.edit`, `tasks.edit_own` | `/edit_task/<id>`, and the dependency add/remove forms |
 | `tasks.change_status` | `/update_task_status/<id>/<status>` |
 | `tasks.change_priority` | `edit_task`, when the priority field actually changes |
 | `tasks.change_due_date` | `edit_task`, when the due date field actually changes |
@@ -82,6 +82,13 @@ Every key below is checked by a route and refuses with a recorded
 | `tasks.export` | `/export/tasks.<fmt>` |
 | `attachments.view`, `.upload`, `.delete` | The three attachment routes |
 | `comments.view`, `comments.create` | `/tasks/<id>/comments` |
+| `comments.edit`, `comments.delete` | The edit and delete forms of a comment. The author may always act on their own comment; the grant acts on anyone's, and its scope decides whose |
+| `teams.view` | The teams list, and whose teams it shows |
+| `teams.create` | Creating a team in `/teams` |
+| `teams.edit` | Editing a team, its roster, and its member permissions in `/teams/<id>` |
+| `teams.delete` | Deleting a team in `/teams` |
+| `teams.manage_members` | Adding a member from the teams list |
+| `teams.manage_meetings` | Starting and ending a live meeting, on top of the team leader and the team-level `manage_meetings` member permission |
 | `notifications.view` | `/notifications/feed`, `/notifications/read`, `/notifications/<id>` |
 | `users.view`, `.create`, `.edit`, `.delete`, `.reset_password` | `/users`; a password reset is its own grant, not covered by `users.edit` |
 | `roles.view`, `.create`, `.edit`, `.delete`, `.assign` | `/roles` and `sync_user_roles` |
@@ -93,9 +100,8 @@ Every key below is checked by a route and refuses with a recorded
 
 The remaining keys are **declared and grantable, but no screen acts on them
 yet**: `tasks.reassign`, `tasks.cancel`, `tasks.restore`, `tasks.archive`,
-`comments.edit`, `comments.delete`, `notifications.manage`, `reports.create`,
-`users.activate`, `users.deactivate`. They are listed here so granting one is
-not mistaken for a working control, and
+`notifications.manage`, `reports.create`, `users.activate`, `users.deactivate`.
+They are listed here so granting one is not mistaken for a working control, and
 `tests/test_permission_enforcement.py` asserts this list stays inside the
 catalog. `users.activate` and `users.deactivate` in particular have no feature
 to bind to: `users` has no `is_active` column, and adding one is a schema
@@ -451,6 +457,7 @@ run touches `.env` or a real database. Run everything with:
 | `test_workspace_regression.py` | Team membership and creation, automation, roles, users, notifications, the assistant API, the admin-only screens, and that every template compiles |
 | `test_automation_reports.py` | Rule firing inside the status request, the assignee as recipient, the live push and its dedupe marker, a silent repeated sweep, `changes_to` versus `equals`, `overdue`, unsupported rule combinations, and the report aggregate, period, scoping, and three export formats |
 | `test_permission_enforcement.py` | Each grant that had a role-screen checkbox but no check behind it: the two field-level task grants, `tasks.assign` versus `tasks.assign_own`, the two export grants, `notifications.view`, `users.reset_password`, `permissions.view`, and that the reserved keys are still grantable |
+| `test_permission_model.py` | The routes that used to read a role name: team create, roster, delete, meetings, dependencies, the `?focus=` shortcut, and comment edit and delete, each with the refusal, the grant that changes the answer, and the case of a session that only claims to be an admin |
 | `test_mssql_audit_integration.py` | The always-on T-SQL dialect layer, plus the opt-in end-to-end run against a real server |
 
 `test_workspace_regression.py` includes a test that compiles every template.

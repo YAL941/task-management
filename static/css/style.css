@@ -53,6 +53,19 @@ a { color: inherit; text-decoration: none; }
 .profile-button:hover { border-color: #cbd5e1; box-shadow: 0 4px 12px rgba(15,23,42,.06); }
 .avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: linear-gradient(135deg, #2563eb, #1d4ed8); font-size: 12px; font-weight: 700; }
 .avatar-lg { width: 36px; height: 36px; }
+.avatar-sm { width: 32px; height: 32px; flex: none; font-size: 12px; }
+.comment-row { display: flex; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.comment-row:last-child { border-bottom: 0; }
+.comment-main { min-width: 0; flex: 1; }
+.comment-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.comment-meta strong { font-size: 13px; }
+.comment-meta small { color: var(--muted); font-size: 11px; }
+.comment-body { margin: 6px 0 0; color: var(--ink); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.comment-actions summary { cursor: pointer; color: var(--blue); font-size: 12px; font-weight: 600; }
+.comment-edit form { margin-top: 8px; display: grid; gap: 8px; }
+.secondary-action.danger { color: var(--red); border-color: #fecdd3; background: #fff1f2; }
+.secondary-action.danger:hover { background: #ffe4e6; }
 .profile-meta strong, .profile-meta small { display: block; }
 .profile-meta strong { font-size: 12px; }
 .profile-meta small { margin-top: 1px; color: var(--muted); font-size: 10px; }

@@ -131,6 +131,9 @@ PERMISSION_CATALOG = {
     "Roles": {"roles.view": "View roles", "roles.create": "Create roles", "roles.edit": "Edit roles", "roles.delete": "Delete roles", "roles.assign": "Assign roles"},
     "Permissions": {"permissions.view": "View permissions", "permissions.manage": "Manage permissions"},
     "Comments": {"comments.view": "View comments", "comments.create": "Create comments", "comments.edit": "Edit comments", "comments.delete": "Delete comments"},
+    "Teams": {"teams.view": "View teams", "teams.create": "Create teams", "teams.edit": "Edit teams",
+              "teams.delete": "Delete teams", "teams.manage_members": "Add and remove team members",
+              "teams.manage_meetings": "Start and end live meetings"},
     "Attachments": {"attachments.view": "View attachments", "attachments.upload": "Upload attachments", "attachments.delete": "Delete attachments"},
     "Notifications": {"notifications.view": "View notifications", "notifications.manage": "Manage notifications"},
     "Reports": {"reports.view": "View reports", "reports.create": "Create reports", "reports.export": "Export reports"},
@@ -422,8 +425,12 @@ ROLE_DEFAULTS = {
         "tasks.view", "tasks.create", "tasks.edit", "tasks.assign", "tasks.reassign", "tasks.change_status",
         "tasks.change_priority", "tasks.change_due_date", "comments.view", "comments.create", "reports.view",
         "reports.export", "notifications.view", "settings.view", "settings.edit", "users.view", "attachments.view", "attachments.upload", "attachments.delete",
+        # A manager runs the teams: creating one, adding people to it, and running
+        # its meetings were already allowed by role name, so the grants keep the
+        # same people able to do the same things.
+        "teams.view", "teams.create", "teams.edit", "teams.delete", "teams.manage_members", "teams.manage_meetings",
     }, "TEAM"),
-    "User": ({"tasks.view", "tasks.create", "tasks.change_status", "tasks.edit_own", "tasks.assign_own", "comments.view", "comments.create", "notifications.view", "settings.view", "settings.edit", "attachments.view", "attachments.upload"}, "OWN"),
+    "User": ({"tasks.view", "tasks.create", "tasks.change_status", "tasks.edit_own", "tasks.assign_own", "comments.view", "comments.create", "notifications.view", "settings.view", "settings.edit", "attachments.view", "attachments.upload", "teams.view"}, "OWN"),
 }
 
 
@@ -1076,6 +1083,8 @@ AUDIT_ACTION_PHRASES = {
     "ATTACHMENT_DELETED": "deleted an attachment from",
     "ATTACHMENT_UPLOAD_FAILED": "failed to upload an attachment to",
     "COMMENT_CREATED": "commented on",
+    "comment_edited": "edited a comment on",
+    "comment_deleted": "deleted a comment on",
     "NOTIFICATION_CREATED": "created a notification for",
     "NOTIFICATION_OPENED": "opened a notification for",
     "NOTIFICATIONS_MARKED_READ": "marked notifications as read for",
@@ -1229,6 +1238,8 @@ AUDIT_EVENT_CATALOG = {
     "logged_out": {"entity": "user", "result": "success"},
     "login_failed": {"entity": "user", "result": "denied"},
     "status_changed": {"entity": "task", "result": "success"},
+    "comment_edited": {"entity": "comment", "result": "success"},
+    "comment_deleted": {"entity": "comment", "result": "success"},
 }
 
 
@@ -1480,6 +1491,10 @@ def handle_unexpected_error(error):
     if isinstance(error, HTTPException) and not isinstance(error, InternalServerError):
         return error
     app.logger.exception("Unhandled error on %s %s", request.method, request.path)
+    # The request is rolled back before anything is written, so a request that
+    # crashed half way through never commits the part that had succeeded. The
+    # audit row below is then the only thing this transaction writes.
+    db.session.rollback()
     try:
         record_access_denial("application_error", "request")
     except Exception:  # noqa: BLE001 - the audit write must never mask the original error
@@ -2258,15 +2273,22 @@ def index():
 @login_required
 def teams():
     if request.method == "POST":
-        if session.get("role") not in {"Admin", "Manager"}:
-            record_access_denial("team_management_forbidden", "team")
+        # One permission per action, so a role can be given the part it needs
+        # instead of inheriting everything an "Admin or Manager" name used to
+        # decide. A member is a change to a team, not a management task.
+        action = request.form.get("action", "create")
+        team_id = request.form.get("team_id", type=int)
+        required = {
+            "delete": "teams.delete",
+            "member": "teams.manage_members",
+        }.get(action, "teams.create")
+        if not has_permission(session["user_id"], required):
+            record_access_denial(f"team_{action}_forbidden", "team", team_id)
             flash("Team management permission is required.", "danger")
             return redirect(url_for("teams"))
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
             return redirect(url_for("teams"))
-        action = request.form.get("action", "create")
-        team_id = request.form.get("team_id", type=int)
         if action == "delete":
             team = db.session.get(Team, team_id)
             if team:
@@ -2333,7 +2355,9 @@ def teams():
     current_view = request.args.get("view", "all").strip().lower()
     teams_list = Team.query.order_by(Team.name).all()
     current_user_id = session.get("user_id")
-    is_global_manager = session.get("role") in {"Admin", "Manager"}
+    # `teams.view` is granted to admins and managers, so this asks the database
+    # who runs the workspace rather than reading the legacy role name.
+    is_global_manager = has_permission(current_user_id, "teams.view", requested_scope="ANY") or has_permission(current_user_id, "teams.edit")
     if current_view == "my" or not is_global_manager:
         current_team_ids = {
             team_id for (team_id,) in db.session.query(TeamMember.team_id).filter_by(user_id=current_user_id).all()
@@ -2403,7 +2427,7 @@ def start_meeting(team_id):
         return redirect(url_for("teams"))
     
     member_row = TeamMember.query.filter_by(team_id=team.id, user_id=session["user_id"]).first()
-    is_manager = session.get("role") in {"Admin", "Manager"}
+    is_manager = has_permission(session["user_id"], "teams.manage_meetings")
     member_permissions = set((member_row.permissions or "").split(",")) if member_row else set()
     can_manage = is_manager or team.leader_id == session["user_id"] or "manage_meetings" in member_permissions
 
@@ -2446,7 +2470,7 @@ def end_meeting(team_id):
     member_row = TeamMember.query.filter_by(team_id=team.id, user_id=session["user_id"]).first()
     member_permissions = set((member_row.permissions or "").split(",")) if member_row else set()
     can_manage = (
-        session.get("role") in {"Admin", "Manager"}
+        has_permission(session["user_id"], "teams.manage_meetings")
         or team.leader_id == session["user_id"]
         or "manage_meetings" in member_permissions
     )
@@ -2486,7 +2510,7 @@ def team_detail(team_id):
     member_rows = TeamMember.query.filter_by(team_id=team.id).order_by(TeamMember.id.asc()).all()
     member_users = [db.session.get(User, row.user_id) for row in member_rows if db.session.get(User, row.user_id)]
     member_ids = [user.id for user in member_users]
-    is_global_manager = session.get("role") in {"Admin", "Manager"}
+    is_global_manager = has_permission(session["user_id"], "teams.edit") or has_permission(session["user_id"], "teams.view", requested_scope="ANY")
     is_team_manager = is_global_manager or team.leader_id == session["user_id"]
     current_member_row = next((row for row in member_rows if row.user_id == session["user_id"]), None)
     current_permissions = set((current_member_row.permissions or "").split(",")) if current_member_row else set()
@@ -3085,8 +3109,9 @@ def tasks():
     focus_id = request.args.get("focus", type=int)
     if focus_id:
         focused = db.session.get(Task, focus_id)
-        member_team_ids = {team_id for (team_id,) in db.session.query(TeamMember.team_id).filter_by(user_id=session["user_id"]).all()}
-        if focused and (session.get("role") == "Admin" or focused.user_id == session["user_id"] or focused.team_id in member_team_ids):
+        # The same visibility rule the detail page uses, so a crafted `?focus=`
+        # cannot open a task the viewer may not see.
+        if focused and can_access_task(session["user_id"], focused):
             detail = Detail.query.filter_by(task_id=focused.id).first()
             assignee = db.session.get(User, focused.user_id) if focused.user_id else None
             focus_task = {
@@ -3170,7 +3195,9 @@ def add_task():
         flash(str(error), "danger")
         return redirect(url_for("tasks"))
     team_id = None
-    if session.get("role") == "Admin":
+    # Putting a task in a team is a management decision, so it follows the team
+    # grant rather than the role name; without it the field is simply ignored.
+    if has_permission(session["user_id"], "teams.create"):
         team_id = request.form.get("team_id", type=int)
         if team_id and not Team.query.get(team_id):
             flash("Assigned team was not found.", "danger")
@@ -3289,9 +3316,13 @@ def task_dependencies(id):
         flash("Task not found.", "danger")
         return redirect(url_for("tasks"))
     if request.method == "POST":
-        if session.get("role") != "Admin" and task.creator_id != session["user_id"]:
+        # A dependency changes what the task can be completed on, so it follows
+        # `tasks.edit`: the sender and the assignee through the own-level grant,
+        # and anyone with the team or global edit grant. The role name is not
+        # consulted.
+        if not has_permission(session["user_id"], "tasks.edit", task):
             record_access_denial("task_dependency_manage_forbidden", "task", task.id)
-            flash("Only the task sender can manage dependencies.", "danger")
+            flash("You do not have permission to manage this task's dependencies.", "danger")
             return redirect(url_for("tasks"))
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
@@ -3616,9 +3647,13 @@ def analytics():
 
     team_health = []
     all_teams = Team.query.order_by(Team.name).all()
+    # `reports.view` is held by admins and managers and by nobody else among the
+    # seeded roles, so this is the same set of people the role-name check named,
+    # except it now comes from the database.
+    sees_every_team = has_permission(session["user_id"], "reports.view")
     for team in all_teams:
         member_ids = [row.user_id for row in TeamMember.query.filter_by(team_id=team.id).all()]
-        if session.get("role") not in {"Admin", "Manager"} and session["user_id"] not in member_ids:
+        if not sees_every_team and session["user_id"] not in member_ids:
             continue
         team_tasks = Task.query.filter((Task.team_id == team.id) | (Task.user_id.in_(member_ids))).all()
         completed = sum(task.status == "Completed" for task in team_tasks)
@@ -3936,8 +3971,101 @@ def task_comments(id):
             else:
                 flash("Comment must contain 1 to 4000 characters.", "danger")
     comments = Comment.query.filter_by(task_id=id).order_by(Comment.id.asc()).all()
-    notifications, unread_count = get_shared_data()
-    return render_template("comments.html", task=task, comments=comments, notifications=notifications, unread_count=unread_count)
+    # The buttons are built from the same function the routes enforce, so a
+    # control can never appear for an action that would be refused.
+    comment_actions = {
+        comment.id: {
+            "edit": can_moderate_comment(session["user_id"], comment, task, "comments.edit"),
+            "delete": can_moderate_comment(session["user_id"], comment, task, "comments.delete"),
+        }
+        for comment in comments
+    }
+    comment_authors = {
+        comment.id: db.session.get(User, comment.user_id)
+        for comment in comments
+    }
+    shared = get_shared_data()
+    return render_template("comments.html", task=task, comments=comments,
+                           comment_actions=comment_actions, comment_authors=comment_authors,
+                           current_user_id=session["user_id"],
+                           notifications=shared[0], unread_count=shared[1])
+
+
+def can_moderate_comment(user_id, comment, task, permission):
+    """The author may always act on their own comment; the grant acts on anyone's.
+
+    Without the grant a person can still correct a typo in what they wrote, which
+    is the normal case, and nobody else can touch it. With `comments.edit` or
+    `comments.delete` the holder moderates the whole task, and the scope decides
+    whose: OWN covers the comment author, TEAM the team, ANY the workspace.
+    """
+    if not comment or not task:
+        return False
+    if comment.user_id == user_id:
+        return True
+    return has_permission(user_id, permission, task)
+
+
+@app.route("/tasks/<int:id>/comments/<int:comment_id>/edit", methods=["POST"])
+@login_required
+def edit_comment(id, comment_id):
+    task = db.session.get(Task, id)
+    comment = db.session.get(Comment, comment_id)
+    if not task or not comment or comment.task_id != task.id:
+        flash("Comment not found.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    if not valid_csrf():
+        flash("Invalid request. Please try again.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    if not can_moderate_comment(session["user_id"], comment, task, "comments.edit"):
+        record_access_denial("comment_edit_forbidden", "comment", comment.id)
+        flash("You do not have permission to edit this comment.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    body = request.form.get("body", "").strip()
+    if not body or len(body) > 4000:
+        flash("Comment must contain 1 to 4000 characters.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    old_body = comment.body
+    comment.body = body
+    write_audit(
+        "comment_edited", "comment", comment.id,
+        old_value={"body": old_body},
+        new_value={"body": body},
+        scope_owner_ids={comment.user_id, task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+        result="success",
+    )
+    db.session.commit()
+    flash("Comment updated.", "success")
+    return redirect(url_for("task_comments", id=id))
+
+
+@app.route("/tasks/<int:id>/comments/<int:comment_id>/delete", methods=["POST"])
+@login_required
+def delete_comment(id, comment_id):
+    task = db.session.get(Task, id)
+    comment = db.session.get(Comment, comment_id)
+    if not task or not comment or comment.task_id != task.id:
+        flash("Comment not found.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    if not valid_csrf():
+        flash("Invalid request. Please try again.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    if not can_moderate_comment(session["user_id"], comment, task, "comments.delete"):
+        record_access_denial("comment_delete_forbidden", "comment", comment.id)
+        flash("You do not have permission to delete this comment.", "danger")
+        return redirect(url_for("task_comments", id=id))
+    write_audit(
+        "comment_deleted", "comment", comment.id,
+        old_value={"body": comment.body},
+        scope_owner_ids={comment.user_id, task.creator_id, task.user_id},
+        scope_team_id=task.team_id,
+        result="success",
+    )
+    db.session.delete(comment)
+    db.session.commit()
+    flash("Comment deleted.", "success")
+    return redirect(url_for("task_comments", id=id))
 
 
 @app.route("/automation", methods=["GET", "POST"])

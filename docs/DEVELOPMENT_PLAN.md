@@ -1,6 +1,6 @@
 # TaskHQ — Development Plan (Audit → Priorities → Phases)
 
-Status: Phase 5 done, Phase 7 done, Phase 6 next. The five decisions are recorded in section 4.
+Status: Phases 5, 6 and 7 done. Next: Phase 8 (reassign, task history, related tasks). The five decisions are recorded in section 4.
 
 ## 1. What the system already does (keep, do not rebuild)
 
@@ -95,7 +95,38 @@ Verified by reading the code and by querying the live database.
 
 Rule for every phase: no feature is added without its backend check, its UI, and its test in the same change.
 
-### Phase 7 — the sender rule, done
+### Phase 6 — permission-based authorization, done
+
+Every route that read a role name now asks the database:
+
+| Was | Now |
+| --- | --- |
+| `/teams` POST: `role in {Admin, Manager}` | `teams.create` / `teams.manage_members` / `teams.delete`, one per action |
+| `/teams` list scope: the same name check | `teams.view`, so a custom role can hold it |
+| `/tasks/<id>/dependencies`: Admin or the sender, no key | `tasks.edit` on the task |
+| `/teams/<id>/meeting/start|end`: the name check | `teams.manage_meetings`, on top of the leader and the team-level member permission |
+| `/teams/<id>` roster and permissions: the name check | `teams.edit` |
+| `/analytics` team health: the name check | `reports.view`, which admins and managers are the only seeded holders of |
+| `/add_task` team field: Admin only | `teams.create` |
+| `?focus=` on the task list: the name check | `can_access_task`, the same rule as the detail page |
+
+`comments.edit` and `comments.delete` are now real routes, and the comment page
+shows the author, their avatar initial, the timestamp, and the controls the
+caller may actually use — the buttons come from the same function the routes
+enforce. Audit rows `comment_edited` and `comment_deleted` carry the old and new
+body.
+
+**Database effect**: `seed_rbac` inserted the six new `teams.*` rows into
+`permissions` and the matching `role_permissions`. No schema change, no data
+removed, and the same mechanism the project already used for every new key.
+`Manager` keeps creating and deleting teams and running meetings, because those
+abilities were there before under a different check.
+
+Two bugs were found by the tests while this landed, both fixed: the new denial
+path read `team_id` before it was assigned, and the error handler committed
+whatever a crashed request had half-written. A crashed request now rolls back
+before the audit row is written.
+
 
 `can_change_task_status(user_id, task)` is the single decision point: the task must
 be assigned, the caller must be the assignee, and `tasks.change_status` must still

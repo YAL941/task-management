@@ -173,7 +173,9 @@ def test_a_non_admin_cannot_change_the_team_roster(workspace):
         assert TeamMember.query.count() == before
         denial = AuditLog.query.filter_by(action="access_denied", entity="team").order_by(AuditLog.id.desc()).first()
         assert denial is not None
-        assert "team_management_forbidden" in denial.new_value
+        # The reason names the action that was refused, so a refusal on the
+        # roster is distinguishable from one on creating or deleting a team.
+        assert "team_member_forbidden" in denial.new_value
 
 
 def test_team_creation_requires_a_name_a_leader_and_a_unique_name(workspace):

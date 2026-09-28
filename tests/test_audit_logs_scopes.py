@@ -528,6 +528,9 @@ def test_team_membership_routes_immediately_change_team_log_visibility(audit_sco
         session["username"] = "scope-manager"
         session["role"] = "Admin"
         session["csrf_token"] = "scope-membership-csrf"
+    # Team management is permission-based now, so the acting user is given the
+    # grants rather than only carrying the "Admin" name in the session.
+    grant_permissions(users["creator"], ("teams.edit", "teams.manage_members"), audit_scope_scenario["cleanup_ids"])
 
     removed = manager_client.post(
         f"/teams/{team_id}",
