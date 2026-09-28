@@ -14,25 +14,56 @@
 <section class="card-surface settings-card">
   <dl class="form-grid">
     <div><dt class="form-label">Action</dt><dd>{{ audit_log.action }}</dd></div>
-    <div><dt class="form-label">Result</dt><dd>{{ audit_result|title }}</dd></div>
+    <div><dt class="form-label">Result</dt><dd>{{ audit_result|title }}{% if audit_reason %} ({{ audit_reason }}){% endif %}</dd></div>
     <div><dt class="form-label">Actor</dt><dd>{{ actor_name }}{% if audit_log.user_id %} (#{{ audit_log.user_id }}){% endif %}</dd></div>
     <div><dt class="form-label">Resource</dt><dd>{% if resource_url %}<a href="{{ resource_url }}">{{ audit_log.entity }} #{{ audit_log.entity_id }}</a>{% else %}{{ audit_log.entity }}{% if audit_log.entity_id %} #{{ audit_log.entity_id }}{% endif %}{% endif %}</dd></div>
     <div><dt class="form-label">IP address</dt><dd>{{ audit_log.ip_address or '-' }}</dd></div>
     <div><dt class="form-label">Team scope</dt><dd>{{ audit_log.scope_team_id or '-' }}</dd></div>
   </dl>
 
-  {% if audit_log.old_value %}
   <div class="form-section">
-    <strong>Before</strong>
+    <strong>What happened</strong>
+    <p>{{ audit_message_text }}</p>
+  </div>
+
+  <div class="form-section">
+    <strong>Changes</strong>
+    {% if audit_change_rows %}
+    <table class="modern-table">
+      <thead>
+        <tr>
+          <th scope="col">Field</th>
+          <th scope="col">Before</th>
+          <th scope="col">After</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for change in audit_change_rows %}
+        <tr>
+          <td class="strong-cell">{{ change.field }}</td>
+          <td class="muted-cell">{{ change.before if change.before is not none else '-' }}</td>
+          <td class="muted-cell">{{ change.after if change.after is not none else '-' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted-cell">No field-level changes were recorded for this event.</p>
+    {% endif %}
+  </div>
+
+  {% if audit_log.old_value or audit_log.new_value %}
+  <details class="form-section">
+    <summary>Raw recorded values</summary>
+    {% if audit_log.old_value %}
+    <p class="form-label">Before</p>
     <pre style="white-space:pre-wrap; overflow-wrap:anywhere;">{{ audit_log.old_value }}</pre>
-  </div>
-  {% endif %}
-  {% if audit_log.new_value %}
-  <div class="form-section">
-    <strong>After / reason</strong>
+    {% endif %}
+    {% if audit_log.new_value %}
+    <p class="form-label">After</p>
     <pre style="white-space:pre-wrap; overflow-wrap:anywhere;">{{ audit_log.new_value }}</pre>
-  </div>
+    {% endif %}
+  </details>
   {% endif %}
-  {% if audit_reason %}<div class="form-section"><strong>Reason</strong><p>{{ audit_reason }}</p></div>{% endif %}
 </section>
 {% endblock %}

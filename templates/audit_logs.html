@@ -1,11 +1,11 @@
 
 {% extends "base.html" %}{% block title %}Audit Logs - TaskHQ{% endblock %}
 {% macro page_url(target_page) -%}
-{{ url_for('audit_logs', page=target_page, per_page=per_page, action=action_filter, entity=entity_filter, search=search, user_id=actor_filter, result=result_filter, date_from=date_from, date_to=date_to, sort=sort, order=order) }}
+{{ url_for('audit_logs', page=target_page, per_page=per_page, action=action_filter, entity=entity_filter, entity_id=entity_id_filter, search=search, user_id=actor_filter, result=result_filter, period=period, date_from=date_from, date_to=date_to, sort=sort, order=order) }}
 {%- endmacro %}
 {% macro sort_link(field, label) -%}
 {% set next_order = 'asc' if sort == field and order == 'desc' else 'desc' %}
-<a href="{{ url_for('audit_logs', page=1, per_page=per_page, action=action_filter, entity=entity_filter, search=search, user_id=actor_filter, result=result_filter, date_from=date_from, date_to=date_to, sort=field, order=next_order) }}" aria-label="Sort by {{ label }} {{ next_order }}">{{ label }}{% if sort == field %} <span aria-hidden="true">{% if order == 'asc' %}&uarr;{% else %}&darr;{% endif %}</span>{% endif %}</a>
+<a href="{{ url_for('audit_logs', page=1, per_page=per_page, action=action_filter, entity=entity_filter, entity_id=entity_id_filter, search=search, user_id=actor_filter, result=result_filter, period=period, date_from=date_from, date_to=date_to, sort=field, order=next_order) }}" aria-label="Sort by {{ label }} {{ next_order }}">{{ label }}{% if sort == field %} <span aria-hidden="true">{% if order == 'asc' %}&uarr;{% else %}&darr;{% endif %}</span>{% endif %}</a>
 {%- endmacro %}
 {% block content %}
 <div class="page-head">
@@ -23,7 +23,7 @@
         <input type="hidden" name="order" value="{{ order }}">
         <div>
             <label for="audit-search" style="display:block; font-size:0.76rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#64748b; margin-bottom:0.45rem;">Search</label>
-            <input id="audit-search" type="text" name="search" value="{{ search or '' }}" placeholder="Action, entity, value..." style="width:100%; padding:0.72rem 0.8rem; border:1px solid #dfe7f1; border-radius:10px; background:#f8fafc;">
+            <input id="audit-search" type="text" name="search" value="{{ search or '' }}" placeholder="Action, entity, value, username..." style="width:100%; padding:0.72rem 0.8rem; border:1px solid #dfe7f1; border-radius:10px; background:#f8fafc;">
         </div>
         <div>
             <label for="audit-action" style="display:block; font-size:0.76rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#64748b; margin-bottom:0.45rem;">Action</label>
@@ -53,6 +53,10 @@
             </select>
         </div>
         <div>
+            <label for="audit-entity-id" style="display:block; font-size:0.76rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#64748b; margin-bottom:0.45rem;">Entity ID</label>
+            <input id="audit-entity-id" type="number" step="1" name="entity_id" value="{{ entity_id_filter if entity_id_filter is not none else '' }}" placeholder="e.g. 1042" style="width:100%; padding:0.72rem 0.8rem; border:1px solid #dfe7f1; border-radius:10px; background:#f8fafc;">
+        </div>
+        <div>
             <label for="audit-result" style="display:block; font-size:0.76rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#64748b; margin-bottom:0.45rem;">Result</label>
             <select id="audit-result" name="result" style="width:100%; padding:0.72rem 0.8rem; border:1px solid #dfe7f1; border-radius:10px; background:#f8fafc;">
                 <option value="">All results</option>
@@ -78,6 +82,13 @@
             </select>
         </div>
         <div>
+            <label id="audit-period-label" style="display:block; font-size:0.76rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#64748b; margin-bottom:0.45rem;">Quick period</label>
+            <div role="group" aria-labelledby="audit-period-label" style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+                <a class="secondary-btn" data-audit-period="today" {% if period == 'today' %}aria-current="page"{% endif %} href="{{ url_for('audit_logs', action=action_filter, entity=entity_filter, entity_id=entity_id_filter, search=search, user_id=actor_filter, result=result_filter, period='today', per_page=per_page, sort=sort, order=order) }}">Today</a>
+                <a class="secondary-btn" data-audit-period="7d" {% if period == '7d' %}aria-current="page"{% endif %} href="{{ url_for('audit_logs', action=action_filter, entity=entity_filter, entity_id=entity_id_filter, search=search, user_id=actor_filter, result=result_filter, period='7d', per_page=per_page, sort=sort, order=order) }}">Last 7 Days</a>
+            </div>
+        </div>
+        <div>
             <button type="submit" class="primary-btn" style="width:100%; min-height:42px;">Apply filters</button>
         </div>
         <div>
@@ -86,7 +97,7 @@
     </form>
 </section>
 
-<section class="card-surface report-table-wrap" data-audit-stream>
+<section class="card-surface report-table-wrap" data-audit-stream data-audit-live-insert="{{ 'true' if live_insert else 'false' }}" data-audit-detail-base="{{ url_for('audit_logs') }}" data-audit-row-limit="{{ per_page }}" data-audit-has-nav="{{ 'true' if total_pages > 1 else 'false' }}">
     <div data-audit-live-notice role="status" aria-live="polite" hidden style="padding:0.75rem 1rem; border-bottom:1px solid #e2e8f0;">
         New audit activity is available. <button type="button" data-audit-refresh class="secondary-btn">Refresh logs</button>
     </div>
@@ -104,9 +115,9 @@
                     <th>Details</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody data-audit-rows>
                 {% for log in logs %}
-                <tr>
+                <tr data-audit-log-id="{{ log.id }}">
                     <td class="muted-cell">{{ log.created_at }}</td>
                     <td>{{ actor_names.get(log.user_id, 'System') }}</td>
                     <td class="strong-cell">{{ log.action }}</td>
@@ -115,10 +126,11 @@
                     <td>#{{ log.entity_id or '-' }}</td>
                     <td>{{ log.ip_address or '-' }}</td>
                     <td class="muted-cell">
-                        {% if log.old_value %}<div><strong>Before:</strong> {{ log.old_value }}</div>{% endif %}
-                        {% if log.new_value %}<div><strong>After:</strong> {{ log.new_value }}</div>{% endif %}
-                        {% if audit_outcomes[log.id][1] %}<div><strong>Reason:</strong> {{ audit_outcomes[log.id][1] }}</div>{% endif %}
-                        {% if not log.old_value and not log.new_value %}-{% endif %}
+                        <div>{{ audit_messages[log.id] }}</div>
+                        {% for change in audit_change_rows[log.id][:3] %}
+                        <div><strong>{{ change.field }}:</strong> {{ change.before if change.before is not none else '-' }} &rarr; {{ change.after if change.after is not none else '-' }}</div>
+                        {% endfor %}
+                        {% if not audit_change_rows[log.id] %}<div>-</div>{% endif %}
                         <a href="{{ url_for('audit_log_detail', audit_log_id=log.id) }}">View details</a>
                     </td>
                 </tr>
@@ -131,7 +143,15 @@
 </section>
 
 <div class="audit-pagination" style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:0.75rem; margin-top:1rem;">
-    <p class="muted-cell" style="margin:0;">Showing {{ first_item }}-{{ last_item }} of {{ total_items }}</p>
+    <p class="muted-cell" style="margin:0;" data-audit-count>Showing {{ first_item }}-{{ last_item }} of {{ total_items }}</p>
+    {% if can_export_audit %}
+    <p class="muted-cell" style="margin:0; display:flex; gap:0.5rem; justify-content:flex-end; align-items:center; flex-wrap:wrap;">
+        <span>Export this scope:</span>
+        <a class="secondary-btn" href="{{ url_for('export_data', resource='audit_logs', file_format='csv') }}">CSV</a>
+        <a class="secondary-btn" href="{{ url_for('export_data', resource='audit_logs', file_format='xlsx') }}">Excel</a>
+        <a class="secondary-btn" href="{{ url_for('export_data', resource='audit_logs', file_format='pdf') }}">PDF</a>
+    </p>
+    {% endif %}
     {% if total_pages > 1 %}
     <nav aria-label="Audit log pages" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem;">
         {% if has_previous %}

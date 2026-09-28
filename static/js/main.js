@@ -131,9 +131,116 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    window.addEventListener('taskhq:audit-log', () => {
-        const notice = document.querySelector('[data-audit-live-notice]');
-        if (notice) notice.hidden = false;
+    const auditStream = document.querySelector('[data-audit-stream]');
+    const auditRows = auditStream?.querySelector('[data-audit-rows]');
+    const auditCounter = document.querySelector('[data-audit-count]');
+    const auditLiveInsert = auditStream?.dataset.auditLiveInsert === 'true';
+    const auditRowLimit = Number(auditStream?.dataset.auditRowLimit || 0);
+    const auditHasPageNav = auditStream?.dataset.auditHasNav === 'true';
+    const auditDetailBase = auditStream?.dataset.auditDetailBase || '';
+    const auditRowIds = () => [...(auditRows?.querySelectorAll('tr[data-audit-log-id]') || [])];
+
+    const auditCell = (className, text) => {
+        const cell = document.createElement('td');
+        if (className) cell.className = className;
+        cell.textContent = text;
+        return cell;
+    };
+
+    const buildAuditRow = (event) => {
+        const row = document.createElement('tr');
+        row.dataset.auditLogId = String(event.sequence);
+        row.append(auditCell('muted-cell', event.timestamp || ''));
+        row.append(auditCell('', event.actorName || 'System'));
+        row.append(auditCell('strong-cell', event.action || ''));
+
+        const resultCell = document.createElement('td');
+        const result = String(event.result || '');
+        const badge = document.createElement('span');
+        badge.className = 'status-badge status-neutral';
+        badge.textContent = result.charAt(0).toUpperCase() + result.slice(1);
+        resultCell.append(badge);
+        row.append(resultCell);
+
+        row.append(auditCell('', event.entityType || '-'));
+        row.append(auditCell('', event.entityId ? `#${event.entityId}` : '-'));
+        row.append(auditCell('', event.ipAddress || '-'));
+
+        const details = document.createElement('td');
+        details.className = 'muted-cell';
+        const summary = document.createElement('div');
+        summary.textContent = event.message || `${event.actorName || 'System'} ${event.action || ''} ${event.entityType || ''}`.trim();
+        details.append(summary);
+        (event.changes || []).slice(0, 3).forEach((change) => {
+            const line = document.createElement('div');
+            const caption = document.createElement('strong');
+            caption.textContent = `${change.field}: `;
+            const before = change.before === null || change.before === undefined ? '-' : String(change.before);
+            const after = change.after === null || change.after === undefined ? '-' : String(change.after);
+            line.append(caption, document.createTextNode(`${before} → ${after}`));
+            details.append(line);
+        });
+        if (!event.changes || !event.changes.length) {
+            const empty = document.createElement('div');
+            empty.textContent = '-';
+            details.append(empty);
+        }
+        const detailLink = document.createElement('a');
+        detailLink.href = `${auditDetailBase}/${event.sequence}`;
+        detailLink.textContent = 'View details';
+        details.append(detailLink);
+        row.append(details);
+        return row;
+    };
+
+    const bumpAuditCounter = () => {
+        if (!auditCounter) return;
+        const parts = auditCounter.textContent.trim().split(/\s+/);
+        const range = (parts[1] || '').split('-');
+        if (range.length !== 2) return;
+        const first = Number(range[0]);
+        const last = Number(range[1]);
+        const total = Number(parts[3]);
+        if (!Number.isFinite(last) || !Number.isFinite(total)) return;
+        if (first === 0 && last === 0) {
+            auditCounter.textContent = 'Showing 1-1 of 1';
+            return;
+        }
+        if (first !== 1) return;
+        const nextLast = auditRowLimit ? Math.min(last + 1, auditRowLimit) : last + 1;
+        auditCounter.textContent = `Showing ${first}-${nextLast} of ${total + 1}`;
+    };
+
+    window.addEventListener('taskhq:audit-log', ({ detail: event }) => {
+        const showNotice = () => {
+            const notice = document.querySelector('[data-audit-live-notice]');
+            if (notice) notice.hidden = false;
+        };
+        const rowId = String(event?.sequence ?? '');
+        if (!auditRows || !auditLiveInsert || !rowId) {
+            showNotice();
+            return;
+        }
+        const rendered = auditRowIds();
+        if (rendered.some((row) => row.dataset.auditLogId === rowId)) return;
+        // Replayed history (audit_sync after a fresh tab) is older than the
+        // rendered page; inserting it would push the newest rows out.
+        const maxRenderedId = rendered.reduce((max, row) => Math.max(max, Number(row.dataset.auditLogId) || 0), 0);
+        if (Number(rowId) <= maxRenderedId) return;
+        if (auditRowLimit && !auditHasPageNav && rendered.length >= auditRowLimit) {
+            showNotice();
+            return;
+        }
+        if (auditRowLimit) {
+            let rows = auditRowIds();
+            while (rows.length >= auditRowLimit) {
+                rows[rows.length - 1].remove();
+                rows = auditRowIds();
+            }
+        }
+        auditRows.querySelector('.empty-state')?.closest('tr')?.remove();
+        auditRows.prepend(buildAuditRow(event));
+        bumpAuditCounter();
     });
     document.querySelector('[data-audit-refresh]')?.addEventListener('click', () => window.location.reload());
 

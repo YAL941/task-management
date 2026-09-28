@@ -8,7 +8,7 @@ import hashlib
 import smtplib
 import ssl
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
@@ -984,16 +984,19 @@ def realtime_sync(data):
 def audit_event_payload(audit_log):
     actor = db.session.get(User, audit_log.user_id) if audit_log.user_id else None
     result, reason = audit_result_reason(audit_log)
+    actor_name = actor.username if actor else "System"
     return {
         "sequence": audit_log.id,
         "eventId": f"audit-{audit_log.id}",
         "eventType": "AUDIT_LOG_CREATED",
         "timestamp": audit_log.created_at,
         "userId": audit_log.user_id,
-        "actorName": actor.username if actor else "System",
+        "actorName": actor_name,
         "entityType": audit_log.entity,
         "entityId": audit_log.entity_id,
         "action": audit_log.action,
+        "message": audit_message(audit_log, actor_name),
+        "changes": audit_changes(audit_log),
         "result": result,
         "reason": reason,
         "oldValue": audit_log.old_value,
@@ -1014,6 +1017,93 @@ def audit_result_reason(audit_log):
         result = "denied" if action in {"access_denied", "login_failed"} else "failed" if action == "attachment_upload_failed" else "success"
     reason = metadata.get("reason") if isinstance(metadata, dict) else None
     return result, reason
+
+
+AUDIT_ACTION_PHRASES = {
+    "logged_in": "signed in",
+    "logged_out": "signed out",
+    "login_failed": "failed to sign in",
+    "created": "created",
+    "updated": "updated",
+    "deleted": "deleted",
+    "imported": "imported",
+    "toggled": "toggled",
+    "status_changed": "changed the status of",
+    "TASK_CREATED": "created",
+    "TASK_UPDATED": "updated",
+    "TASK_DELETED": "deleted",
+    "TASK_VIEWED": "viewed",
+    "TASK_ASSIGNED": "assigned",
+    "TASK_REASSIGNED": "reassigned",
+    "TASK_STATUS_CHANGED": "changed the status of",
+    "ATTACHMENT_UPLOADED": "uploaded an attachment to",
+    "ATTACHMENT_DOWNLOADED": "downloaded an attachment from",
+    "ATTACHMENT_DELETED": "deleted an attachment from",
+    "ATTACHMENT_UPLOAD_FAILED": "failed to upload an attachment to",
+    "COMMENT_CREATED": "commented on",
+    "NOTIFICATION_CREATED": "created a notification for",
+    "NOTIFICATION_OPENED": "opened a notification for",
+    "NOTIFICATIONS_MARKED_READ": "marked notifications as read for",
+    "USER_CREATED": "created a user",
+    "USER_UPDATED": "updated a user",
+    "USER_DELETED": "deleted a user",
+    "ROLE_CREATED": "created a role",
+    "ROLE_UPDATED": "updated a role",
+    "ROLE_DELETED": "deleted a role",
+    "ROLE_PERMISSION_UPDATED": "changed role permissions on",
+}
+
+AUDIT_INTERNAL_VALUE_KEYS = {"_audit"}
+
+
+def audit_json_value(raw):
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return {"value": raw}
+
+
+def audit_value_fields(payload):
+    if isinstance(payload, dict):
+        return {key: value for key, value in payload.items() if key not in AUDIT_INTERNAL_VALUE_KEYS}
+    if payload in ({}, None, ""):
+        return {}
+    return {"value": payload}
+
+
+def audit_changes(audit_log):
+    """Field-level before/after pairs, with the internal `_audit` metadata removed."""
+    before = audit_value_fields(audit_json_value(audit_log.old_value))
+    after = audit_value_fields(audit_json_value(audit_log.new_value))
+    if not before and not after:
+        return []
+    changes = []
+    for field in sorted(set(before) | set(after)):
+        previous = before.get(field)
+        current = after.get(field)
+        if previous == current:
+            continue
+        changes.append({"field": field, "before": previous, "after": current})
+    return changes
+
+
+def audit_message(audit_log, actor_name):
+    action = (audit_log.action or "").strip()
+    entity = (audit_log.entity or "").replace("_", " ")
+    target = f"{entity} #{audit_log.entity_id}" if audit_log.entity_id else entity
+    if action in {"access_denied", "ACCESS_DENIED"}:
+        path = audit_json_value(audit_log.new_value).get("path")
+        return f"{actor_name} was denied access to {path or target}"
+    phrase = AUDIT_ACTION_PHRASES.get(action) or action.replace("_", " ").lower() or "recorded an action on"
+    message = f"{actor_name} {phrase} {target}".strip()
+    result, reason = audit_result_reason(audit_log)
+    if result == "denied":
+        message += f" - denied ({reason})" if reason else " - denied"
+    elif result == "failed":
+        message += f" - failed ({reason})" if reason else " - failed"
+    return message
 
 
 def audit_log_visible_to_user(audit_log, user_id):
@@ -1334,7 +1424,7 @@ def admin_required(view):
     @login_required
     def wrapped_view(*args, **kwargs):
         if not has_permission(session.get("user_id"), "permissions.manage"):
-            record_access_denial("permission_denied", "permission")
+            record_access_denial("permissions_manage_forbidden", "permission")
             flash("Administrator permission is required.", "danger")
             return redirect(url_for("tasks"))
         return view(*args, **kwargs)
@@ -1890,12 +1980,14 @@ def api_ai_ask():
 @login_required
 def settings():
     if not has_permission(session["user_id"], "settings.view"):
+        record_access_denial("settings_view_forbidden", "settings")
         flash("You do not have permission to view settings.", "danger")
         return redirect(url_for("tasks"))
     preferences = get_notification_preferences(session["user_id"])
     user = db.session.get(User, session["user_id"])
     if request.method == "POST":
         if not has_permission(session["user_id"], "settings.edit"):
+            record_access_denial("settings_edit_forbidden", "settings")
             flash("You do not have permission to edit settings.", "danger")
             return redirect(url_for("settings"))
         if not valid_csrf():
@@ -1966,6 +2058,7 @@ def index():
 def teams():
     if request.method == "POST":
         if session.get("role") not in {"Admin", "Manager"}:
+            record_access_denial("team_management_forbidden", "team")
             flash("Team management permission is required.", "danger")
             return redirect(url_for("teams"))
         if not valid_csrf():
@@ -2114,6 +2207,7 @@ def start_meeting(team_id):
     can_manage = is_manager or team.leader_id == session["user_id"] or "manage_meetings" in member_permissions
 
     if not can_manage:
+        record_access_denial("meeting_start_forbidden", "team", team.id)
         flash("You don't have permission to start a meeting.", "danger")
         return redirect(url_for("team_detail", team_id=team.id))
 
@@ -2156,6 +2250,7 @@ def end_meeting(team_id):
         or "manage_meetings" in member_permissions
     )
     if not can_manage:
+        record_access_denial("meeting_end_forbidden", "team", team.id)
         flash("You don't have permission to end this meeting.", "danger")
         return redirect(url_for("team_detail", team_id=team.id))
     meeting = TeamMeeting.query.filter_by(team_id=team_id, ended_at=None).order_by(TeamMeeting.id.desc()).first()
@@ -2215,6 +2310,7 @@ def team_detail(team_id):
         action = request.form.get("action", "message")
         if action in {"add_member", "remove_member"}:
             if not can_manage_members:
+                record_access_denial("team_member_manage_forbidden", "team", team.id)
                 if is_async_request:
                     return {"ok": False, "error": "You do not have permission to manage team members."}, 403
                 flash("You do not have permission to manage team members.", "danger")
@@ -2293,10 +2389,12 @@ def team_detail(team_id):
                 flash("Team member removed.", "success")
             return redirect(url_for("team_detail", team_id=team.id))
         if action == "create_team_task" and not can_create_tasks:
+            record_access_denial("team_task_create_forbidden", "team", team.id)
             flash("You do not have permission to create team tasks.", "danger")
             return redirect(url_for("team_detail", team_id=team.id))
         if action == "permissions":
             if not is_team_manager:
+                record_access_denial("team_permission_update_forbidden", "team", team.id)
                 flash("Only the team leader, managers, and admins can update team permissions.", "danger")
                 return redirect(url_for("team_detail", team_id=team.id))
             member_id = request.form.get("member_id", type=int)
@@ -2368,6 +2466,7 @@ def team_detail(team_id):
                 flash("A valid task title and priority are required.", "danger")
                 return redirect(url_for("team_detail", team_id=team.id))
             if assignee_id not in member_ids and session.get("role") not in {"Admin", "Manager"}:
+                record_access_denial("team_task_assign_outside_team_forbidden", "team", team.id)
                 flash("You can only assign tasks to members of this team.", "danger")
                 return redirect(url_for("team_detail", team_id=team.id))
             if assignee_id not in member_ids:
@@ -2412,6 +2511,7 @@ def team_detail(team_id):
 
         body = request.form.get("message", "").strip()
         if body and not can_post_messages:
+            record_access_denial("team_message_forbidden", "team", team.id)
             if is_async_request:
                 return {"ok": False, "error": "You do not have permission to post team messages."}, 403
             flash("You do not have permission to post team messages.", "danger")
@@ -2535,6 +2635,7 @@ def team_detail(team_id):
 @login_required
 def roles():
     if not has_permission(session["user_id"], "roles.view"):
+        record_access_denial("roles_view_forbidden", "role")
         flash("You do not have permission to view roles.", "danger")
         return redirect(url_for("tasks"))
     if request.method == "POST":
@@ -2543,6 +2644,7 @@ def roles():
         role = db.session.get(Role, request.form.get("role_id", type=int)) if request.form.get("role_id") else None
         required = "roles.create" if action == "create" else "roles.delete" if action == "delete" else "roles.edit"
         if not has_permission(session["user_id"], required):
+            record_access_denial(f"{required.replace('.', '_')}_forbidden", "role", role.id if role else None)
             return {"ok": False, "error": "You are not authorized for this role action."}, 403
         if action == "create":
             name = request.form.get("name", "").strip()
@@ -2606,6 +2708,7 @@ def my_permissions():
 def users():
     view = request.args.get("view", "all")
     if not has_permission(session["user_id"], "users.view"):
+        record_access_denial("users_view_forbidden", "user")
         flash("You do not have permission to view users.", "danger")
         return redirect(url_for("tasks"))
     if request.method == "POST":
@@ -2617,6 +2720,7 @@ def users():
         user = User.query.get(user_id) if user_id else None
         required_permission = "users.delete" if action == "delete" else "users.edit" if user else "users.create"
         if not has_permission(session["user_id"], required_permission):
+            record_access_denial(f"{required_permission.replace('.', '_')}_forbidden", "user", user.id if user else None)
             flash("You do not have permission to manage users this way.", "danger")
             return redirect(url_for("users", view=view))
         if action == "delete":
@@ -2752,6 +2856,7 @@ def users():
 @login_required
 def tasks():
     if not has_permission(session["user_id"], "tasks.view"):
+        record_access_denial("tasks_view_forbidden", "task")
         flash("You do not have permission to view tasks.", "danger")
         return redirect(url_for("index"))
     tasks_query = task_rows_for_current_user()
@@ -2802,6 +2907,7 @@ def tasks():
 @login_required
 def add_task():
     if not has_permission(session["user_id"], "tasks.create"):
+        record_access_denial("task_create_forbidden", "task")
         flash("You do not have permission to create tasks.", "danger")
         return redirect(url_for("tasks"))
     if request.method == "GET":
@@ -2827,6 +2933,7 @@ def add_task():
         return redirect(url_for("tasks"))
     uploads = request.files.getlist("attachments")
     if uploads and any(upload and upload.filename for upload in uploads) and not has_permission(session["user_id"], "attachments.upload"):
+        record_access_denial("attachment_upload_forbidden", "task")
         flash("You do not have permission to upload attachments.", "danger")
         return redirect(url_for("tasks"))
     try:
@@ -2950,6 +3057,7 @@ def task_dependencies(id):
         return redirect(url_for("tasks"))
     if request.method == "POST":
         if session.get("role") != "Admin" and task.creator_id != session["user_id"]:
+            record_access_denial("task_dependency_manage_forbidden", "task", task.id)
             flash("Only the task sender can manage dependencies.", "danger")
             return redirect(url_for("tasks"))
         if not valid_csrf():
@@ -2985,6 +3093,7 @@ def delete_dependency(task_id, dependency_id):
     if not task or not dependency or dependency.successor_id != task_id:
         flash("Dependency not found.", "danger")
     elif session.get("role") != "Admin" and task.creator_id != session["user_id"]:
+        record_access_denial("task_dependency_manage_forbidden", "task", task.id)
         flash("Only the task sender can manage dependencies.", "danger")
     elif not valid_csrf():
         flash("Invalid request. Please try again.", "danger")
@@ -2999,6 +3108,7 @@ def delete_dependency(task_id, dependency_id):
 @login_required
 def reports():
     if not has_permission(session["user_id"], "reports.view"):
+        record_access_denial("reports_view_forbidden", "reports")
         flash("You do not have permission to view reports.", "danger")
         return redirect(url_for("tasks"))
     reports_data = task_rows_for_current_user()
@@ -3010,6 +3120,7 @@ def reports():
 @login_required
 def analytics():
     if not has_permission(session["user_id"], "reports.view"):
+        record_access_denial("analytics_view_forbidden", "reports")
         flash("You do not have permission to view analytics.", "danger")
         return redirect(url_for("tasks"))
     visible = visible_tasks_for_user(session["user_id"])
@@ -3072,16 +3183,20 @@ def analytics():
     )
 
 
+AUDIT_PERIOD_DAYS = {"today": 0, "7d": 6}
+
+
 @app.route("/audit-logs")
 @login_required
 def audit_logs():
     if not has_permission(session["user_id"], "audit_logs.view"):
-        record_access_denial("permission_denied", "audit_logs")
+        record_access_denial("audit_logs_view_forbidden", "audit_logs")
         flash("You do not have permission to view audit logs.", "danger")
         return redirect(url_for("tasks"))
 
     scopes = AuditScopeResolver.scopes_for_user(session["user_id"])
     if not scopes:
+        record_access_denial("audit_logs_scope_forbidden", "audit_logs")
         abort(403)
     scoped_query = AuditScopeResolver.apply_to_query(
         AuditLog.query, session["user_id"], scopes
@@ -3089,16 +3204,25 @@ def audit_logs():
     query = scoped_query
     action_filter = (request.args.get("action") or "").strip()
     entity_filter = (request.args.get("entity") or "").strip()
+    entity_id_filter = request.args.get("entity_id", type=int)
     search = (request.args.get("search") or "").strip()
     actor_filter = request.args.get("user_id", type=int)
     result_filter = (request.args.get("result") or "").strip().lower()
+    period = (request.args.get("period") or "").strip().lower()
     date_from = (request.args.get("date_from") or "").strip()
     date_to = (request.args.get("date_to") or "").strip()
+    if period not in AUDIT_PERIOD_DAYS:
+        period = ""
+    effective_date_from = date_from
+    if period and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_from):
+        effective_date_from = (date.today() - timedelta(days=AUDIT_PERIOD_DAYS[period])).isoformat()
 
     if action_filter:
         query = query.filter(AuditLog.action.ilike(f"%{action_filter}%"))
     if entity_filter:
         query = query.filter(AuditLog.entity.ilike(f"%{entity_filter}%"))
+    if entity_id_filter is not None:
+        query = query.filter(AuditLog.entity_id == entity_id_filter)
     if actor_filter:
         query = query.filter(AuditLog.user_id == actor_filter)
     if result_filter == "denied":
@@ -3107,17 +3231,19 @@ def audit_logs():
         query = query.filter(AuditLog.action == "ATTACHMENT_UPLOAD_FAILED")
     elif result_filter == "success":
         query = query.filter(AuditLog.action.notin_(["access_denied", "login_failed", "ATTACHMENT_UPLOAD_FAILED"]))
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_from):
-        query = query.filter(AuditLog.created_at >= date_from + "T00:00:00")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", effective_date_from):
+        query = query.filter(AuditLog.created_at >= effective_date_from + "T00:00:00")
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_to):
         query = query.filter(AuditLog.created_at <= date_to + "T23:59:59")
     if search:
+        matching_actor_ids = db.session.query(User.id).filter(User.username.ilike(f"%{search}%"))
         query = query.filter(
             or_(
                 AuditLog.action.ilike(f"%{search}%"),
                 AuditLog.entity.ilike(f"%{search}%"),
                 AuditLog.new_value.ilike(f"%{search}%"),
                 AuditLog.old_value.ilike(f"%{search}%"),
+                AuditLog.user_id.in_(matching_actor_ids),
             )
         )
 
@@ -3181,17 +3307,36 @@ def audit_logs():
         actor_names[user.id] = user.username
     resource_urls = {log.id: audit_resource_url(log, session["user_id"]) for log in logs}
     audit_outcomes = {log.id: audit_result_reason(log) for log in logs}
+    audit_messages = {
+        log.id: audit_message(log, actor_names.get(log.user_id, "System")) for log in logs
+    }
+    audit_change_rows = {log.id: audit_changes(log) for log in logs}
+    can_export_audit = has_permission(session["user_id"], "audit_logs.export")
     notifications, unread_count = get_shared_data()
+    live_insert = not (
+        action_filter
+        or entity_filter
+        or entity_id_filter is not None
+        or search
+        or actor_filter
+        or result_filter
+        or period
+        or date_from
+        or date_to
+    ) and page == 1 and sort == "created_at" and order == "desc"
     return render_template(
         "audit_logs.html",
         logs=logs,
         notifications=notifications,
         unread_count=unread_count,
+        live_insert=live_insert,
         action_filter=action_filter,
         entity_filter=entity_filter,
+        entity_id_filter=entity_id_filter,
         search=search,
         actor_filter=actor_filter,
         result_filter=result_filter,
+        period=period,
         date_from=date_from,
         date_to=date_to,
         current_page=page,
@@ -3211,6 +3356,9 @@ def audit_logs():
         actor_names=actor_names,
         resource_urls=resource_urls,
         audit_outcomes=audit_outcomes,
+        audit_messages=audit_messages,
+        audit_change_rows=audit_change_rows,
+        can_export_audit=can_export_audit,
     )
 
 
@@ -3233,6 +3381,8 @@ def audit_log_detail(audit_log_id):
         resource_url=resource_url,
         audit_result=result,
         audit_reason=reason,
+        audit_message_text=audit_message(audit_log, actor.username if actor else "System"),
+        audit_change_rows=audit_changes(audit_log),
         notifications=get_shared_data()[0],
         unread_count=get_shared_data()[1],
     )
@@ -3250,6 +3400,20 @@ def audit_resource_url(audit_log, user_id):
             return url_for("team_detail", team_id=team.id)
     elif audit_log.entity == "user" and has_permission(user_id, "users.view"):
         return url_for("users")
+    elif audit_log.entity == "comment" and audit_log.entity_id:
+        comment = db.session.get(Comment, audit_log.entity_id)
+        task = db.session.get(Task, comment.task_id) if comment else None
+        if task and has_permission(user_id, "comments.view", task) and can_access_task(user_id, task):
+            return url_for("task_comments", id=task.id)
+    elif audit_log.entity == "attachment" and audit_log.entity_id:
+        attachment = db.session.get(Attachment, audit_log.entity_id)
+        task = db.session.get(Task, attachment.task_id) if attachment else None
+        if task and has_permission(user_id, "attachments.view", task) and can_access_task(user_id, task):
+            return url_for("task_view", task_id=task.id)
+    elif audit_log.entity == "role" and has_permission(user_id, "roles.view"):
+        return url_for("roles")
+    elif audit_log.entity == "automation_rule" and has_permission(user_id, "permissions.manage"):
+        return url_for("automation")
     return None
 
 
@@ -3258,6 +3422,7 @@ def audit_resource_url(audit_log, user_id):
 def task_comments(id):
     task = db.session.get(Task, id)
     if not task or not has_permission(session["user_id"], "comments.view", task) or not can_access_task(session["user_id"], task):
+        record_access_denial("comment_view_forbidden", "task", task.id if task else id)
         flash("Task not found or not accessible.", "danger")
         return redirect(url_for("tasks"))
     if request.method == "POST":
@@ -3389,15 +3554,63 @@ def data_center():
     return render_template("data_center.html", resource=resource, preview=preview, errors=errors, notifications=notifications, unread_count=unread_count)
 
 
+def audit_export_rows(user_id):
+    """Audit rows the viewer may export: requires the view and export grants and
+    is limited to the viewer's audit scope, so an export can never widen access."""
+    if not has_permission(user_id, "audit_logs.view") or not has_permission(user_id, "audit_logs.export"):
+        record_access_denial("audit_logs_export_forbidden", "audit_logs")
+        return None
+    scopes = AuditScopeResolver.scopes_for_user(user_id)
+    if not scopes:
+        record_access_denial("audit_logs_scope_forbidden", "audit_logs")
+        return None
+    scoped_query = AuditScopeResolver.apply_to_query(AuditLog.query, user_id, scopes)
+    logs = scoped_query.order_by(AuditLog.id).all()
+    actor_names = {}
+    for log in logs:
+        if log.user_id and log.user_id not in actor_names:
+            actor = db.session.get(User, log.user_id)
+            actor_names[log.user_id] = actor.username if actor else "System"
+    rows = []
+    for log in logs:
+        result, reason = audit_result_reason(log)
+        rows.append({
+            "id": log.id,
+            "created_at": log.created_at,
+            "actor": actor_names.get(log.user_id, "System") if log.user_id else "System",
+            "action": log.action,
+            "entity": log.entity,
+            "entity_id": log.entity_id,
+            "result": result,
+            "reason": reason or "",
+            "message": audit_message(log, actor_names.get(log.user_id, "System")),
+            "ip_address": log.ip_address or "",
+            "old_value": log.old_value or "",
+            "new_value": log.new_value or "",
+        })
+    return rows
+
+
 @app.route("/export/<resource>.<file_format>")
 @admin_required
 def export_data(resource, file_format):
-    if resource not in {"tasks", "users", "teams", "reports"} or file_format not in {"csv", "xlsx", "pdf"}:
+    if resource not in {"tasks", "users", "teams", "reports", "audit_logs"} or file_format not in {"csv", "xlsx", "pdf"}:
         return {"ok": False, "error": "Unsupported export"}, 400
     if resource in {"tasks", "reports"}:
         rows = [{"id": task.id, "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "user_id": task.user_id, "team_id": task.team_id} for task in Task.query.order_by(Task.id).all()]
     elif resource == "users":
         rows = [{"id": user.id, "username": user.username, "role": user.role, "email": user.email} for user in User.query.order_by(User.id).all()]
+    elif resource == "audit_logs":
+        rows = audit_export_rows(session["user_id"])
+        if rows is None:
+            return {"ok": False, "error": "You are not authorized to export audit logs."}, 403
+        AuditEventService.record(
+            "exported", "audit_logs", None,
+            new_value={"format": file_format, "row_count": len(rows)},
+            scope_owner_ids={session["user_id"]},
+            result="success",
+        )
+        db.session.commit()
     else:
         rows = [{"id": team.id, "name": team.name, "leader_id": team.leader_id, "status": team.status} for team in Team.query.order_by(Team.id).all()]
     if file_format == "csv":
