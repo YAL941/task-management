@@ -1,13 +1,85 @@
 {% extends "base.html" %}
 
-{% block title %}Task Dependencies - TaskHQ{% endblock %}
+{% block title %}Related tasks - TaskHQ{% endblock %}
+
+{% macro relation_row(item, side) -%}
+  {% set linked = item.task %}
+  <div class="setting-row">
+    <span>
+      <strong>
+        {%- if item.dependency.dependency_type == 'Related To' -%}
+          Related to
+        {%- elif side == 'upstream' -%}
+          {%- if item.blocking -%}Blocked by{%- else -%}Related to{%- endif -%}
+        {%- else -%}
+          {%- if item.blocking -%}Blocks{%- else -%}Is linked from{%- endif -%}
+        {%- endif -%}
+        <a href="{{ url_for('task_view', task_id=linked.id) }}">{{ linked.title }}</a>
+      </strong>
+      <small>
+        Task #{{ linked.id }} &middot; {{ linked.status }}
+        {%- if linked.priority %} &middot; {{ linked.priority }}{% endif -%}
+        {%- if linked.due_date %} &middot; due {{ linked.due_date[:10] }}{% endif -%}
+        {%- if side == 'upstream' and item.blocking and linked.status != 'Completed' %}
+          &middot; <span style="color:var(--danger, #b91c1c);">still open, this task waits for it</span>
+        {%- endif -%}
+      </small>
+    </span>
+    {% if can_manage and side == 'upstream' %}
+    <form method="POST" action="{{ url_for('delete_dependency', task_id=task.id, dependency_id=item.dependency.id) }}" data-confirm="Remove this dependency?">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="secondary-action" type="submit">Remove</button>
+    </form>
+    {% endif %}
+  </div>
+{%- endmacro %}
 
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Task planning</p><h1>Dependencies</h1><p class="page-subtitle">Control the order of work for <strong>{{ task.title }}</strong>.</p></div><a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>→</span></a></div>
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Task planning</p>
+    <h1>Related tasks</h1>
+    <p class="page-subtitle">What <strong>{{ task.title }}</strong> waits for, and what waits for it.</p>
+  </div>
+  <a href="{{ url_for('task_view', task_id=task.id) }}" class="secondary-action">Back to the task <span>→</span></a>
+</div>
+
 <section class="card-surface settings-card">
-    {% if session.get('role') == 'Admin' or task.creator_id == session.get('user_id') %}
-    <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><div class="form-section"><div class="form-section-title"><span class="form-number">01</span><div><strong>Add dependency</strong><small>A blocking dependency prevents completion until the previous task is complete.</small></div></div><div class="form-grid"><label class="form-label">Previous task<select class="field" name="predecessor_id" required><option value="">Choose a task</option>{% for candidate in candidates %}<option value="{{ candidate.id }}">#{{ candidate.id }} {{ candidate.title }}</option>{% endfor %}</select></label><label class="form-label">Relationship<select class="field" name="dependency_type">{% for dependency_type in dependency_types %}<option>{{ dependency_type }}</option>{% endfor %}</select></label></div><div class="form-actions"><button class="primary-action" type="submit">Add dependency <span>→</span></button></div></div></form>
-    {% endif %}
-    <div class="form-section"><div class="form-section-title"><span class="form-number">02</span><div><strong>Current dependencies</strong><small>Cycles are blocked automatically.</small></div></div>{% for dependency, predecessor in dependencies %}<div class="setting-row"><span><strong>{{ dependency.dependency_type }}: {{ predecessor.title }}</strong><small>Task #{{ predecessor.id }} · {{ predecessor.status }}</small></span>{% if session.get('role') == 'Admin' or task.creator_id == session.get('user_id') %}<form method="POST" action="{{ url_for('delete_dependency', task_id=task.id, dependency_id=dependency.id) }}" data-confirm="Remove this dependency?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary-action" type="submit">Remove</button></form>{% endif %}</div>{% else %}<div class="empty-state"><span class="empty-state-icon">↔</span><strong>No dependencies</strong><p>This task can be completed independently.</p></div>{% endfor %}</div>
+  {% if can_manage %}
+  <form method="POST" action="{{ url_for('task_dependencies', id=task.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-section">
+      <div class="form-section-title"><span class="form-number">01</span><div><strong>Link another task</strong><small>A blocking link keeps this task open until the other one is completed. Cycles are refused automatically.</small></div></div>
+      <div class="form-grid">
+        <label class="form-label">Other task
+          <select class="field" name="predecessor_id" required>
+            <option value="">Choose a task</option>
+            {% for candidate in candidates %}<option value="{{ candidate.id }}">#{{ candidate.id }} {{ candidate.title }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="form-label">Relationship
+          <select class="field" name="dependency_type">{% for dependency_type in dependency_types %}<option>{{ dependency_type }}</option>{% endfor %}</select>
+        </label>
+      </div>
+      <div class="form-actions"><button class="primary-action" type="submit">Link task <span>→</span></button></div>
+    </div>
+  </form>
+  {% endif %}
+
+  <div class="form-section">
+    <div class="form-section-title"><span class="form-number">02</span><div><strong>This task waits for</strong><small>The tasks that have to move before this one can be completed.</small></div></div>
+    {% for item in upstream %}{{ relation_row(item, 'upstream') }}
+    {% else %}
+    <div class="empty-state"><span class="empty-state-icon">↔</span><strong>Nothing blocks it</strong><p>This task can be completed on its own.</p></div>
+    {% endfor %}
+  </div>
+
+  <div class="form-section">
+    <div class="form-section-title"><span class="form-number">03</span><div><strong>Waiting on this task</strong><small>The tasks that cannot move until this one is done.</small></div></div>
+    {% for item in downstream %}{{ relation_row(item, 'downstream') }}
+    {% else %}
+    <div class="empty-state"><span class="empty-state-icon">→</span><strong>Nothing waits for it</strong><p>No other task is linked behind this one yet.</p></div>
+    {% endfor %}
+  </div>
 </section>
 {% endblock %}

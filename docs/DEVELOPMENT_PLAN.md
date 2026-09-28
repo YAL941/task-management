@@ -1,6 +1,7 @@
 # TaskHQ — Development Plan (Audit → Priorities → Phases)
 
-Status: Phases 5, 6 and 7 done. Next: Phase 8 (reassign, task history, related tasks). The five decisions are recorded in section 4.
+Status: Phases 5, 6, 7 and 8 done. Next: Phase 9 (task list: search, filters, sort, pagination). 
+The five decisions are recorded in section 4.
 
 ## 1. What the system already does (keep, do not rebuild)
 
@@ -81,8 +82,7 @@ Verified by reading the code and by querying the live database.
 | 5 | Fix the defects above that need no decision: error handler, XSS sinks, `rel=noopener`, confirmations, dead code removal, N+1 fixes | none |
 | 6 | Permission model: seed `Supervisor`/`Employee`, add the missing permission checks, replace every role-name gate with a permission check | decisions D, E |
 | 7 | Sender rule enforced in the backend, mirrored by the UI, with tests for the refused case | decision A |
-| 8 | Reassign, comment edit/delete, per-task history timeline, related tasks | decision A |
-| 9 | Task list: server-side search, filters, sort, pagination | none |
+| 8 | Reassign, comment edit/delete, per-task history timeline, related tasks | decision A || 9 | Task list: server-side search, filters, sort, pagination | none |
 | 10 | Dashboard: the 13 metrics and the charts, all from the database | none |
 | 11 | Analytics core (deterministic, no LLM): per-user workload, per-task risk score, daily summary — each returning its inputs and its reason | decision C |
 | 12 | Assistant integration: the assistant answers from those analyses; optional LLM narration on top; human confirmation before any write | decision B |
@@ -135,6 +135,42 @@ reads the body, so a refused attempt writes no comment, no audit row and no
 notification. `task_view` and the task list take their `can_change_status` from the
 same function. Six tests cover it, including the sender who is also the assignee
 and the unassigned task.
+
+### Phase 8 — reassign, history, related tasks
+
+**Reassignment.** `POST /tasks/<id>/reassign` follows `tasks.reassign`, the key that
+had no screen behind it. The new assignee has to be a real, different user; the
+old assignee, the new one and the sender are notified, none of them the manager
+who did it unless they are one of those three. The audit row is
+`task_reassigned` with both assignees, and its scope owners are the three people
+who need to see it, so the trail is not lost to the person who handed the task
+over. A refusal is written as `access_denied` with `task_reassign_forbidden`.
+
+**Per-task history.** The timeline used to show only the rows filed under the
+task itself, so an edited comment and a removed attachment — filed under their
+own entity — were invisible on the page where a reader looks for them. It now
+reads all three, renders one sentence per event through `audit_message` plus the
+field changes from `audit_changes`, and states the count when it is truncated at
+`ACTIVITY_LIMIT` (100) instead of silently showing the newest hundred.
+
+**Related tasks.** The dependencies screen showed one direction only, offered
+every task in the workspace as a candidate, and had no access check at all. It now:
+
+| Was | Now |
+| --- | --- |
+| Only the tasks this one waits for | Both directions, worded per row: *Blocked by*, *Blocks*, *Related to* |
+| `Task.query.filter(Task.id != id)` as candidates | Only the tasks the caller may open, minus the ones already linked |
+| No check on the page | `can_view_task_dependencies`: `tasks.view` **and** `can_access_task` |
+| Add form drawn from `role == 'Admin' or creator`, remove checked the same name | Both follow `tasks.edit`; the sender keeps working through the own-level grant |
+| A link to any task id | The predecessor has to pass the same visibility rule, refused as `task_dependency_target_forbidden` |
+
+The task page now carries a *Related tasks* section with the two counts, the
+open-blocker warning, and the list, so the screen is reachable from the task
+itself instead of from nowhere — no template had linked to it.
+
+**Database effect**: none. `tasks.reassign` already existed in `permissions`;
+the catalog gained the `task_reassigned` phrase and event row. No schema change,
+no data change.
 
 ## 4. Decisions taken
 

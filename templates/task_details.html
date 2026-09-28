@@ -71,10 +71,51 @@
     </div>
     {% endif %}
 
-    {% if can_manage_task %}
     <div class="form-section">
       <div class="form-section-title">
         <span class="form-number">03</span>
+        <div>
+          <strong>Related tasks</strong>
+          <small>What this task waits for, and what waits for it.</small>
+        </div>
+      </div>
+      <div class="mini-metrics" style="margin:0 0 14px; grid-template-columns:repeat(2, minmax(0, 1fr));">
+        <div><small>Waiting on</small><span>{{ upstream|length }}</span></div>
+        <div><small>Waiting for this</small><span>{{ downstream|length }}</span></div>
+      </div>
+      {% if open_blockers %}
+      <p class="muted-cell" style="margin:0 0 12px;">This task cannot be completed yet: {{ open_blockers|length }} linked task{{ 's' if open_blockers|length != 1 else '' }} still {{ 'are' if open_blockers|length != 1 else 'is' }} open.</p>
+      {% endif %}
+      <div style="display:grid; gap:8px;">
+        {% for item in upstream %}
+        <div style="display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:10px;">
+          <span>{% if item.blocking %}<strong>Blocked by</strong>{% else %}<strong>Related to</strong>{% endif %}
+            <a href="{{ url_for('task_view', task_id=item.task.id) }}">{{ item.task.title }}</a>
+            <small style="display:block; color:var(--muted);">#{{ item.task.id }} &middot; {{ item.task.status }}</small>
+          </span>
+        </div>
+        {% endfor %}
+        {% for item in downstream %}
+        <div style="display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:10px;">
+          <span>{% if item.blocking %}<strong>Blocks</strong>{% else %}<strong>Related to</strong>{% endif %}
+            <a href="{{ url_for('task_view', task_id=item.task.id) }}">{{ item.task.title }}</a>
+            <small style="display:block; color:var(--muted);">#{{ item.task.id }} &middot; {{ item.task.status }}</small>
+          </span>
+        </div>
+        {% endfor %}
+        {% if not upstream and not downstream %}
+        <p class="muted-cell" style="margin:0;">No related tasks are linked to this one.</p>
+        {% endif %}
+      </div>
+      <div class="form-actions" style="justify-content:flex-start; padding:14px 0 0;">
+        <a href="{{ url_for('task_dependencies', id=task.id) }}" class="secondary-action">Manage related tasks</a>
+      </div>
+    </div>
+
+    {% if can_manage_task %}
+    <div class="form-section">
+      <div class="form-section-title">
+        <span class="form-number">04</span>
         <div>
           <strong>Sender controls</strong>
           <small>The sender can update or remove this task.</small>
@@ -91,8 +132,34 @@
     </div>
     {% endif %}
 
+    {% if can_reassign %}
     <div class="form-section">
-      <div class="form-section-title"><span class="form-number">04</span><div><strong>Attachments</strong><small>Files are stored outside the database; this list contains metadata only.</small></div></div>
+      <div class="form-section-title">
+        <span class="form-number">05</span>
+        <div>
+          <strong>Reassign</strong>
+          <small>Hand this task to somebody else. The previous assignee and the sender are told.</small>
+        </div>
+      </div>
+      <form method="POST" action="{{ url_for('reassign_task', id=task.id) }}" style="display:grid; gap:12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="form-label">New assignee
+          <select class="field" name="assigned_user_id" required>
+            <option value="">Choose a person</option>
+            {% for candidate in users.values() %}
+              {% if candidate.id != task.user_id %}
+              <option value="{{ candidate.id }}">{{ candidate.username }} &middot; {{ candidate.first_name }} {{ candidate.last_name }}</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </label>
+        <button class="primary-action" type="submit" style="width:max-content;">Reassign task</button>
+      </form>
+    </div>
+    {% endif %}
+
+    <div class="form-section">
+      <div class="form-section-title"><span class="form-number">06</span><div><strong>Attachments</strong><small>Files are stored outside the database; this list contains metadata only.</small></div></div>
       {% if has_permission_upload|default(false) %}
       <form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_task_attachments', task_id=task.id) }}" style="display:grid; gap:12px; margin-bottom:16px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -129,27 +196,37 @@
 
     <div class="form-section">
       <div class="form-section-title">
-        <span class="form-number">05</span>
+        <span class="form-number">07</span>
         <div>
           <strong>Activity timeline</strong>
-          <small>Changes recorded for this task.</small>
+          <small>Everything recorded for this task, its comments, and its attachments.</small>
         </div>
       </div>
       <div style="display:grid; gap:8px;">
-        {% for activity in activity_logs %}
+        {% for entry in activity_entries %}
         <article style="display:grid; grid-template-columns:minmax(130px, auto) minmax(0, 1fr); gap:10px; padding:10px 12px; border-left:3px solid #0f766e; background:#f8fafc;">
-          <small style="color:var(--muted);">{{ activity.created_at }}</small>
-          <div><strong>{{ users.get(activity.user_id).username if users.get(activity.user_id) else 'System' }}</strong> {{ activity.action }} <span>{{ activity.entity }}</span>{% if activity.new_value %}<div class="muted-cell">{{ activity.new_value }}</div>{% endif %}</div>
+          <small style="color:var(--muted);">{{ entry.log.created_at }}</small>
+          <div>
+            {# One readable sentence per event, built by the same helper the
+               audit pages use instead of showing a raw action name. #}
+            <strong>{{ entry.actor }}</strong> {{ entry.message }}
+            {% for change in entry.changes %}
+            <div class="muted-cell"><strong>{{ change.field }}:</strong> {{ change.before if change.before is not none else '-' }} &rarr; {{ change.after if change.after is not none else '-' }}</div>
+            {% endfor %}
+          </div>
         </article>
         {% else %}
         <p class="muted-cell">No task changes recorded yet.</p>
         {% endfor %}
       </div>
+      {% if activity_total > activity_limit %}
+      <p class="muted-cell" style="margin-top:10px;">Showing the most recent {{ activity_limit }} of {{ activity_total }} recorded events. The full history is on the audit log page.</p>
+      {% endif %}
     </div>
 
     <div class="form-section">
       <div class="form-section-title">
-        <span class="form-number">06</span>
+        <span class="form-number">08</span>
         <div>
           <strong>Comments</strong>
           <small>Activity recorded against this task.</small>

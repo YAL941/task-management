@@ -20,7 +20,7 @@ from werkzeug.exceptions import HTTPException, InternalServerError
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
-from sqlalchemy import event, func, inspect, or_, text
+from sqlalchemy import and_, event, func, inspect, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -115,6 +115,9 @@ def verify_password(stored_password, raw_password):
 
 VALID_ROLES = {"User", "Manager", "Admin"}
 VALID_STATUSES = {"Pending", "In Progress", "Completed", "Rejected"}
+# How much history one task page shows. The count of what is left out is stated
+# on the page, so a truncated timeline never reads as the whole story.
+ACTIVITY_LIMIT = 100
 VALID_PRIORITIES = {"Low", "Medium", "High"}
 VALID_DEPENDENCY_TYPES = {"Blocks", "Blocked By", "Related To"}
 PERMISSION_SCOPES = {"OWN", "TEAM", "ANY"}
@@ -1077,6 +1080,7 @@ AUDIT_ACTION_PHRASES = {
     "TASK_VIEWED": "viewed",
     "TASK_ASSIGNED": "assigned",
     "TASK_REASSIGNED": "reassigned",
+    "task_reassigned": "reassigned",
     "TASK_STATUS_CHANGED": "changed the status of",
     "ATTACHMENT_UPLOADED": "uploaded an attachment to",
     "ATTACHMENT_DOWNLOADED": "downloaded an attachment from",
@@ -1238,6 +1242,7 @@ AUDIT_EVENT_CATALOG = {
     "logged_out": {"entity": "user", "result": "success"},
     "login_failed": {"entity": "user", "result": "denied"},
     "status_changed": {"entity": "task", "result": "success"},
+    "task_reassigned": {"entity": "task", "result": "success"},
     "comment_edited": {"entity": "comment", "result": "success"},
     "comment_deleted": {"entity": "comment", "result": "success"},
 }
@@ -1724,6 +1729,49 @@ def dependency_would_cycle(predecessor_id, successor_id):
     return False
 
 
+def can_view_task_dependencies(user_id, task):
+    """Related tasks are read under the same rule as the task itself.
+
+    A dependency row carries the title of another task, so a page of related
+    tasks is a page about more than the task in the address bar. It is therefore
+    gated on the same pair the detail page uses.
+    """
+    return bool(task) and has_permission(user_id, "tasks.view", task) and can_access_task(user_id, task)
+
+
+def task_relations(task_id, direction):
+    """The related tasks on one side of a dependency, with the row that links them.
+
+    `direction` is `"predecessor"` for what the task waits for and `"successor"`
+    for what waits for it. Each item carries the linked task, the stored
+    dependency type, and the caller's own blocker state, so a template can say
+    what a row means without a second query per row.
+    """
+    linked_id = TaskDependency.predecessor_id if direction == "predecessor" else TaskDependency.successor_id
+    anchor_id = TaskDependency.successor_id if direction == "predecessor" else TaskDependency.predecessor_id
+    rows = (
+        db.session.query(TaskDependency, Task)
+        .join(Task, Task.id == linked_id)
+        .filter(anchor_id == task_id)
+        .all()
+    )
+    relations = []
+    for dependency, related in rows:
+        relations.append({
+            "dependency": dependency,
+            "task": related,
+            # A "Blocks" row pointing at us means that task cannot be completed
+            # until this one is; the stored type alone does not say which side
+            # the reader is standing on.
+            "blocking": (
+                dependency.dependency_type in ("Blocks", "Blocked By")
+                and (direction == "predecessor") == (dependency.dependency_type == "Blocks")
+            ),
+        })
+    relations.sort(key=lambda item: (item["task"].title or "").casefold())
+    return relations
+
+
 AUTOMATION_EVENTS = {"status_changed", "overdue"}
 AUTOMATION_CONDITIONS = {"equals", "changes_to"}
 AUTOMATION_ACTIONS = {"notify", "email"}
@@ -2011,8 +2059,55 @@ def task_view(task_id):
     detail = Detail.query.filter_by(task_id=task.id).first()
     comments = Comment.query.filter_by(task_id=task.id).order_by(Comment.id.asc()).all()
     attachments = Attachment.query.filter_by(task_id=task.id).order_by(Attachment.id.asc()).all()
-    activity_logs = AuditLog.query.filter_by(entity="task", entity_id=task.id).order_by(AuditLog.id.desc()).limit(100).all()
+    # The history of a task is everything that happened to it, not only the rows
+    # filed under the task itself: a comment that was edited and an attachment
+    # that was removed are filed under their own entity, and both belong on this
+    # timeline. `can_access_task` has already been decided, so the rows are the
+    # caller's own history.
+    comment_ids = [comment.id for comment in comments]
+    attachment_ids = [attachment.id for attachment in attachments]
+    history_filter = or_(
+        and_(AuditLog.entity == "task", AuditLog.entity_id == task.id),
+        and_(AuditLog.entity == "comment", AuditLog.entity_id.in_(comment_ids)) if comment_ids else False,
+        and_(AuditLog.entity == "attachment", AuditLog.entity_id.in_(attachment_ids)) if attachment_ids else False,
+    )
+    activity_total = db.session.query(func.count(AuditLog.id)).filter(history_filter).scalar() or 0
+    activity_logs = (
+        AuditLog.query.filter(history_filter)
+        .order_by(AuditLog.id.desc())
+        .limit(ACTIVITY_LIMIT)
+        .all()
+    )
+    # One readable sentence per event, from the same helpers the audit pages use,
+    # so a task reads the way the log does instead of showing action names. The
+    # field changes come with it: the sentence says what happened, the values
+    # say what it was and what it became.
+    activity_entries = []
+    for log in activity_logs:
+        actor = db.session.get(User, log.user_id) if log.user_id else None
+        actor_name = actor.username if actor else "System"
+        activity_entries.append({
+            "log": log,
+            "actor": actor_name,
+            "message": audit_message(log, actor_name),
+            "changes": audit_changes(log)[:3],
+        })
     users = {user.id: user for user in User.query.order_by(User.username).all()}
+    # Related tasks, both directions, so the page states what it waits for and
+    # what waits for it. A dependency row names another task, so both sides are
+    # filtered to what this caller may open.
+    upstream = [
+        item for item in task_relations(task.id, "predecessor")
+        if can_access_task(session["user_id"], item["task"])
+    ]
+    downstream = [
+        item for item in task_relations(task.id, "successor")
+        if can_access_task(session["user_id"], item["task"])
+    ]
+    open_blockers = [
+        item for item in upstream
+        if item["blocking"] and item["task"].status != "Completed"
+    ]
     # One query for the bell, not two: the unread rows are the count.
     shared = get_shared_data()
     return render_template(
@@ -2021,12 +2116,19 @@ def task_view(task_id):
         detail=detail,
         comments=comments,
         activity_logs=activity_logs,
+        activity_entries=activity_entries,
+        activity_total=activity_total,
+        activity_limit=ACTIVITY_LIMIT,
         users=users,
         attachments=attachments,
         can_delete_attachments=has_permission(session["user_id"], "attachments.delete", task),
         has_permission_upload=has_permission(session["user_id"], "attachments.upload", task),
         can_change_status=can_change_task_status(session["user_id"], task),
         can_manage_task=has_permission(session["user_id"], "tasks.edit", task),
+        can_reassign=has_permission(session["user_id"], "tasks.reassign", task),
+        upstream=upstream,
+        downstream=downstream,
+        open_blockers=open_blockers,
         notifications=shared[0],
         unread_count=shared[1],
     )
@@ -3308,6 +3410,63 @@ def update_status(id, new_status):
     return redirect(url_for("tasks"))
 
 
+@app.route("/tasks/<int:id>/reassign", methods=["POST"])
+@login_required
+def reassign_task(id):
+    """Hand a task to somebody else, keeping the trail of who held it before.
+
+    Reassignment is a management action rather than an edit, so it follows
+    `tasks.reassign`, which the seeded `User` role does not hold: a manager or an
+    admin can move work between people, and a person who only sends tasks cannot
+    reassign them afterwards. The new assignee must be a real, different user.
+    """
+    task = db.session.get(Task, id)
+    if not task:
+        flash("Task not found.", "danger")
+        return redirect(url_for("tasks"))
+    if not valid_csrf():
+        flash("Invalid request. Please try again.", "danger")
+        return redirect(url_for("task_view", task_id=id))
+    if not has_permission(session["user_id"], "tasks.reassign", task):
+        record_access_denial("task_reassign_forbidden", "task", task.id)
+        flash("You do not have permission to reassign this task.", "danger")
+        return redirect(url_for("task_view", task_id=id))
+    new_assignee_id = request.form.get("assigned_user_id", type=int)
+    new_assignee = db.session.get(User, new_assignee_id) if new_assignee_id else None
+    if not new_assignee or new_assignee.id == task.user_id:
+        flash("Choose a different, valid assignee.", "danger")
+        return redirect(url_for("task_view", task_id=id))
+    previous_assignee = db.session.get(User, task.user_id) if task.user_id else None
+    old_assignee_id = task.user_id
+    task.user_id = new_assignee.id
+    # The person who can now move the task is the new assignee, so the audit
+    # scope has to name them; the old assignee keeps sight of what they held.
+    write_audit(
+        "task_reassigned", "task", task.id,
+        old_value={"assignee_id": old_assignee_id, "assignee": previous_assignee.username if previous_assignee else "Unassigned"},
+        new_value={"assignee_id": new_assignee.id, "assignee": new_assignee.username},
+        scope_owner_ids={task.creator_id, old_assignee_id, new_assignee.id},
+        scope_team_id=task.team_id,
+        result="success",
+    )
+    stamp = datetime.now().isoformat(timespec="seconds")
+    for recipient_id, message in (
+        (new_assignee.id, f"You were assigned a task: {task.title}"),
+        (task.creator_id, f"Task reassigned: {task.title} is now with {new_assignee.username}"),
+        (old_assignee_id, f"Task moved to {new_assignee.username}: {task.title}"),
+    ):
+        if recipient_id and recipient_id != session["user_id"]:
+            create_notification(recipient_id, message, stamp, scope_team_id=task.team_id)
+    db.session.commit()
+    record_realtime_event(
+        "TASK_REASSIGNED", session["user_id"], "task", task.id,
+        {"oldAssigneeId": old_assignee_id, "newAssigneeId": new_assignee.id, "newAssignee": new_assignee.username},
+        {f"task:{task.id}", f"user:{new_assignee.id}", f"user:{old_assignee_id}", f"user:{task.creator_id}"},
+    )
+    flash(f"Task reassigned to {new_assignee.username}.", "success")
+    return redirect(url_for("task_view", task_id=id))
+
+
 @app.route("/tasks/<int:id>/dependencies", methods=["GET", "POST"])
 @login_required
 def task_dependencies(id):
@@ -3324,6 +3483,12 @@ def task_dependencies(id):
             record_access_denial("task_dependency_manage_forbidden", "task", task.id)
             flash("You do not have permission to manage this task's dependencies.", "danger")
             return redirect(url_for("tasks"))
+        # The grant alone is not enough: a dependency page names other tasks by
+        # title, so it is read by the same people who may open this task.
+        if not can_view_task_dependencies(session["user_id"], task):
+            record_access_denial("task_dependencies_forbidden", "task", task.id)
+            flash("You do not have access to this task.", "danger")
+            return redirect(url_for("tasks"))
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
             return redirect(url_for("task_dependencies", id=id))
@@ -3332,6 +3497,11 @@ def task_dependencies(id):
         predecessor = db.session.get(Task, predecessor_id) if predecessor_id else None
         if not predecessor or predecessor.id == task.id or dependency_type not in VALID_DEPENDENCY_TYPES:
             flash("Choose a valid different task and dependency type.", "danger")
+        elif not can_view_task_dependencies(session["user_id"], predecessor):
+            # The row names the other task by title on this page, so a link may
+            # only be made to a task the caller could have opened anyway.
+            record_access_denial("task_dependency_target_forbidden", "task", predecessor.id)
+            flash("Choose a task you have access to.", "danger")
         elif dependency_would_cycle(predecessor.id, task.id):
             flash("That dependency would create a cycle.", "danger")
         else:
@@ -3343,10 +3513,37 @@ def task_dependencies(id):
                 db.session.rollback()
                 flash("This dependency already exists.", "danger")
         return redirect(url_for("task_dependencies", id=id))
-    dependencies = db.session.query(TaskDependency, Task).join(Task, Task.id == TaskDependency.predecessor_id).filter(TaskDependency.successor_id == id).all()
-    candidates = Task.query.filter(Task.id != id).order_by(Task.title).all()
+    if not can_view_task_dependencies(session["user_id"], task):
+        record_access_denial("task_dependencies_forbidden", "task", task.id)
+        flash("You do not have access to this task.", "danger")
+        return redirect(url_for("tasks"))
+    # Related tasks read in both directions: what this task waits for, and what
+    # waits for it. Showing only one side hid half of the chain the people doing
+    # the work actually need.
+    upstream = task_relations(task.id, "predecessor")
+    downstream = task_relations(task.id, "successor")
+    # The candidate list is built from the tasks the caller may open, so a
+    # dependency on somebody else's work cannot become a way to read its title.
+    linked_ids = {task.id} | {item["task"].id for item in upstream} | {item["task"].id for item in downstream}
+    candidates = [
+        candidate
+        for candidate in visible_tasks_for_user(session["user_id"])
+        if candidate.id not in linked_ids
+    ]
+    candidates.sort(key=lambda candidate: (candidate.title or "").casefold())
+    can_manage = has_permission(session["user_id"], "tasks.edit", task)
     notifications, unread_count = get_shared_data()
-    return render_template("dependencies.html", task=task, dependencies=dependencies, candidates=candidates, dependency_types=sorted(VALID_DEPENDENCY_TYPES), notifications=notifications, unread_count=unread_count)
+    return render_template(
+        "dependencies.html",
+        task=task,
+        upstream=upstream,
+        downstream=downstream,
+        candidates=candidates,
+        can_manage=can_manage,
+        dependency_types=sorted(VALID_DEPENDENCY_TYPES),
+        notifications=notifications,
+        unread_count=unread_count,
+    )
 
 
 @app.route("/tasks/<int:task_id>/dependencies/<int:dependency_id>/delete", methods=["POST"])
@@ -3356,9 +3553,9 @@ def delete_dependency(task_id, dependency_id):
     dependency = db.session.get(TaskDependency, dependency_id)
     if not task or not dependency or dependency.successor_id != task_id:
         flash("Dependency not found.", "danger")
-    elif session.get("role") != "Admin" and task.creator_id != session["user_id"]:
+    elif not has_permission(session["user_id"], "tasks.edit", task):
         record_access_denial("task_dependency_manage_forbidden", "task", task.id)
-        flash("Only the task sender can manage dependencies.", "danger")
+        flash("You do not have permission to manage this task's dependencies.", "danger")
     elif not valid_csrf():
         flash("Invalid request. Please try again.", "danger")
     else:
