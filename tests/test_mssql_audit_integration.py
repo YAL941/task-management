@@ -132,6 +132,7 @@ def test_audit_flow_against_a_real_sql_server():
         db.create_all()
 
         marker = f"MSSQL_{uuid.uuid4().hex[:8]}"
+        created_role_ids = []
 
         def make_user(label, permission_keys, scope):
             user = User(
@@ -155,12 +156,16 @@ def test_audit_flow_against_a_real_sql_server():
                 )
                 db.session.add(role)
                 db.session.flush()
+                # Track the exact ids this test created. Selecting roles by name
+                # prefix would also catch rows from an interrupted earlier run,
+                # and deleting those fails on the user_roles foreign key.
+                created_role_ids.append(role.id)
                 db.session.add(RolePermission(role_id=role.id, permission_id=grant.id, scope=scope))
                 db.session.add(UserRole(user_id=user.id, role_id=role.id, assigned_by=user.id, created_at=f"{TODAY.isoformat()}T00:00:00"))
             return user
 
         any_viewer = make_user("Any", ("audit_logs.view", "audit_logs.export", "permissions.manage"), "ANY")
-        own_viewer = make_user("Own", ("audit_logs.view",), "OWN")
+        own_viewer = make_user("Own", ("audit_logs.view", "audit_logs.export", "permissions.manage"), "OWN")
 
         owned = AuditLog(
             user_id=own_viewer.id,
@@ -196,7 +201,7 @@ def test_audit_flow_against_a_real_sql_server():
         created = {
             "user_ids": [any_viewer.id, own_viewer.id],
             "any_username": any_viewer.username,
-            "role_ids": [row.id for row in Role.query.filter(Role.name.like("mssql_%")).all()],
+            "role_ids": list(created_role_ids),
             "log_ids": [owned.id, foreign.id, older.id],
             "owned_id": owned.id,
             "foreign_id": foreign.id,
@@ -219,16 +224,17 @@ def test_audit_flow_against_a_real_sql_server():
         # Username search through the users subquery.
         assert "9002" in any_client.get(f"/audit-logs?search={created['any_username']}").get_data(as_text=True)
 
-        # Exact entity id filter.
-        entity_body = any_client.get("/audit-logs?entity_id=9002&per_page=100").get_data(as_text=True)
+        # Exact entity id filter. Every request is narrowed to this run's marker
+        # so a reused database cannot decide the outcome.
+        entity_body = any_client.get(f"/audit-logs?entity_id=9002&per_page=100&search={marker}").get_data(as_text=True)
         assert "9002" in entity_body
         assert "9001" not in entity_body
 
         # Ready-made relative period.
-        today_body = any_client.get("/audit-logs?period=today&per_page=100").get_data(as_text=True)
+        today_body = any_client.get(f"/audit-logs?period=today&per_page=100&search={marker}").get_data(as_text=True)
         assert "9001" in today_body
         assert "9003" not in today_body
-        seven_day_body = any_client.get("/audit-logs?period=7d&per_page=100").get_data(as_text=True)
+        seven_day_body = any_client.get(f"/audit-logs?period=7d&per_page=100&search={marker}").get_data(as_text=True)
         assert "9001" in seven_day_body
         assert "9003" not in seven_day_body
 
@@ -249,12 +255,22 @@ def test_audit_flow_against_a_real_sql_server():
         assert marker.encode("utf-8") in csv_body.data
         scoped_csv = own_client.get("/export/audit_logs.csv")
         assert scoped_csv.status_code == 200
+        assert b"9001" in scoped_csv.data
         assert b"9002" not in scoped_csv.data
     finally:
         with app.app_context():
+            # The export step records its own audit row under the exporter with
+            # scope_owner_ids={session["user_id"]}, so scope owners referencing
+            # these users must be removed before the audit rows and the users.
+            AuditLogScopeOwner.query.filter(AuditLogScopeOwner.owner_user_id.in_(created["user_ids"])).delete(synchronize_session=False)
             AuditLogScopeOwner.query.filter(AuditLogScopeOwner.audit_log_id.in_(created["log_ids"])).delete(synchronize_session=False)
             AuditLog.query.filter(AuditLog.id.in_(created["log_ids"])).delete(synchronize_session=False)
+            AuditLog.query.filter(AuditLog.user_id.in_(created["user_ids"])).delete(synchronize_session=False)
+            # Children before parents, and cover both directions of the reference:
+            # a role may be assigned to a user this test made, and the app assigns
+            # roles while the requests run, so delete by role id as well.
             UserRole.query.filter(UserRole.user_id.in_(created["user_ids"])).delete(synchronize_session=False)
+            UserRole.query.filter(UserRole.role_id.in_(created["role_ids"])).delete(synchronize_session=False)
             RolePermission.query.filter(RolePermission.role_id.in_(created["role_ids"])).delete(synchronize_session=False)
             Role.query.filter(Role.id.in_(created["role_ids"])).delete(synchronize_session=False)
             User.query.filter(User.id.in_(created["user_ids"])).delete(synchronize_session=False)

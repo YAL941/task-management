@@ -25,6 +25,116 @@ the current user's effective grants are available at `/api/me/permissions`.
 Role changes are audited and publish `PERMISSIONS_UPDATED` over the existing
 Socket.IO connection.
 
+### Permission catalog
+
+`permissions.key` is the grant stored in `role_permissions`; `has_permission`
+is the only check. The `<entity>.<action>` pairs that end in `.edit`, `.delete`,
+or `.assign` also honour the matching `*_own` grant, and only when the caller owns
+the resource (`creator_id` or `user_id`) or shares a team with it.
+
+| Group | Keys |
+| --- | --- |
+| Tasks | `tasks.view`, `tasks.create`, `tasks.edit`, `tasks.delete`, `tasks.assign`, `tasks.reassign`, `tasks.change_status`, `tasks.change_priority`, `tasks.change_due_date`, `tasks.cancel`, `tasks.restore`, `tasks.archive`, `tasks.export`, `tasks.edit_own`, `tasks.delete_own`, `tasks.assign_own` |
+| Users | `users.view`, `users.create`, `users.edit`, `users.delete`, `users.activate`, `users.deactivate`, `users.reset_password` |
+| Roles | `roles.view`, `roles.create`, `roles.edit`, `roles.delete`, `roles.assign` |
+| Permissions | `permissions.view`, `permissions.manage` |
+| Comments | `comments.view`, `comments.create`, `comments.edit`, `comments.delete` |
+| Attachments | `attachments.view`, `attachments.upload`, `attachments.delete` |
+| Notifications | `notifications.view`, `notifications.manage` |
+| Reports | `reports.view`, `reports.create`, `reports.export` |
+| Audit Logs | `audit_logs.view`, `audit_logs.export` |
+| Settings | `settings.view`, `settings.edit` |
+
+`PERMISSION_SCOPES` is `OWN`, `TEAM`, and `ANY`. A `TEAM` grant only applies to a
+resource whose `team_id` the caller is a `TeamMember` of, and an `OWN` grant only
+to a resource they created or were assigned. The seeded system roles grant: all
+46 keys at `ANY` (Super Admin, Admin), 19 team keys at `TEAM` (Manager), and 12
+own-level keys at `OWN` (User). The catalog is defined in `PERMISSION_CATALOG`
+and the defaults in `ROLE_DEFAULTS`; both are the authoritative source.
+
+Team membership carries its own separate permission set, stored comma-joined on
+`TeamMember.permissions`: `view_tasks`, `create_tasks`, `post_messages`,
+`manage_members`, `manage_meetings`. These are not part of the RBAC catalog.
+
+`has_permission` treats a resource the caller neither owns nor shares a team
+with as matching only an `ANY` grant, and fails closed when no grant exists.
+`User.role` is a compatibility field: `user_roles` falls back to the system role
+of the same name, so a legacy value of `User` still yields the `User` role's
+twelve own-level grants.
+
+## HTTP API
+
+Every route is guarded by `login_required`; `/automation`, `/data`, and
+`/export` are additionally guarded by `admin_required`, which requires
+`permissions.manage` and redirects otherwise. The permission column lists the
+check the view performs inside the request; a refusal records an
+`access_denied` row with the matching `*_forbidden` reason code and flashes the
+message, so it is never a silent 403. All mutating routes require the CSRF token
+in the form body or the `X-CSRF-Token` header; the JSON routes answer `400` with
+`{"ok": false, "error": "Invalid request"}` instead of redirecting.
+
+| Method | Path | Permission | Notes |
+| --- | --- | --- | --- |
+| GET, POST | `/login` | none | `POST` needs no CSRF; writes `logged_in` or `login_failed` |
+| POST | `/logout` | session | `logged_out` |
+| GET | `/` | session | Dashboard |
+| GET | `/tasks` | `tasks.view` | `?view=all|sent|received|urgent`, `?status`, `?priority`, `?q`, `?focus` |
+| GET, POST | `/add_task` | `tasks.create` | `POST` needs a title, a priority in `Low/Medium/High`, a real assignee, and a `YYYY-MM-DD` due date if given |
+| GET, POST | `/edit_task/<id>` | `tasks.edit` (or `tasks.edit_own`) | Audits only a real change; a no-op write is not recorded |
+| POST | `/delete_task/<id>` | `tasks.delete` (or `tasks.delete_own`) | `comment` is required and stored as the delete reason |
+| POST | `/update_task_status/<id>/<status>` | `tasks.change_status` | `status` must be in `Pending`, `In Progress`, `Completed`, `Rejected`; `Completed`/`Rejected` require `comment`; a non-admin cannot complete a task whose `Blocks`/`Blocked By` predecessor is still open |
+| GET, POST | `/tasks/<id>/comments` | `comments.view`, `comments.create` | Comment bodies are never copied into audit values |
+| GET | `/tasks/<id>/view` | `tasks.view` | |
+| POST | `/tasks/<id>/attachments` | `attachments.upload` | Extension, MIME type, and size are validated; a refusal is `ATTACHMENT_UPLOAD_FAILED` |
+| GET | `/attachments/<id>/preview`, `/download` | `attachments.view` | Both record an audit row |
+| POST | `/attachments/<id>/delete` | `attachments.delete` | JSON, `400` on a bad token |
+| GET, POST | `/tasks/<id>/dependencies` | sender or `Admin` | Rejects an unknown task, a self-reference, an unknown type, and cycles |
+| POST | `/tasks/<id>/dependencies/<dep>/delete` | sender or `Admin` | |
+| GET, POST | `/teams` | `Admin` or `Manager` for POST | `action` is `create`, `member`, or `delete`; a name and a real `leader_id` are required for `create` |
+| GET, POST | `/teams/<id>` | team membership for POST | Membership, role, and meeting changes |
+| GET | `/team-workspace` | session | |
+| POST | `/teams/<id>/meeting/start`, `/end` | `manage_meetings` for that team | |
+| GET, POST | `/users` | `users.view` to read, `users.*` to write | Legacy role column plus the RBAC role assignment |
+| GET, POST | `/roles` | `roles.view` to read, `roles.create`/`roles.edit`/`roles.delete` to write | System roles cannot be deleted |
+| GET | `/api/me/permissions` | session | `{"permissions": [{"key", "role", "scope"}, ...]}` |
+| GET | `/api/realtime/token` | session | `{"token", "user_id"}` for the Socket.IO handshake |
+| POST | `/api/ai/ask` | session | `{"prompt"}`, required, at most 2000 characters; `{"ok", "answer", "mode"}` where `mode` is `mock` or `live` |
+| GET, POST | `/assistant` | session | The HTML view of the assistant |
+| GET, POST | `/automation` | `permissions.manage` | `name` and `value` are required |
+| POST | `/automation/<id>/toggle` | `permissions.manage` | Flips `enabled` and records `toggled` |
+| GET, POST | `/data` | `permissions.manage` | Import; writes `imported` |
+| GET | `/export/<resource>.<fmt>` | `permissions.manage`, plus the resource's own key (`audit_logs` needs `audit_logs.view` and `audit_logs.export`) | `csv`, `xlsx`, `pdf`; an audit export is itself recorded |
+| GET, POST | `/settings` | `settings.view` to read, `settings.edit` to write | |
+| POST | `/settings/test-email` | `settings.edit` | Mock mode unless SMTP is configured |
+| GET | `/reports`, `/analytics` | `reports.view` | Analytics is not a separate key; it reuses `reports.view` |
+| GET | `/audit-logs` | `audit_logs.view` | Scoped; see "Filtering" |
+| GET | `/audit-logs/<id>` | `audit_logs.view` and in-scope | `404` when out of scope, so ids cannot be probed |
+| GET | `/notifications/feed` | session | `{"unread_count", "notifications": [{"id", "message", "created_at", "url", "is_read"}]}` for the caller only |
+| POST | `/notifications/read` | session | JSON, `notification_ids` |
+| GET | `/notifications/<id>` | session | Marks it read; redirects when the row is not the caller's |
+
+## Realtime events
+
+The Socket.IO connection authenticates with the JWT from
+`GET /api/realtime/token`; an absent or invalid token is refused. On connect the
+server joins the `global`, `user:<id>`, and - when the user has any audit scope -
+`audit:user:<id>` rooms, and the caller receives `connected`.
+
+| Direction | Event | Payload |
+| --- | --- | --- |
+| server -> client | `connected` | `{userId, serverTime}` |
+| server -> client | `presence` | `{eventType, userId, status, timestamp}` for every connected user |
+| server -> client | `realtime_event` | `{sequence, eventId, eventType, timestamp, userId, entityType, entityId, payload}` |
+| server -> client | `audit_log_event` | The full `audit_event_payload`: `sequence`, `eventId`, `eventType`, `timestamp`, `userId`, `actorName`, `entityType`, `entityId`, `action`, `message`, `changes`, `result`, `reason`, `oldValue`, `newValue`, `ipAddress` |
+| client -> server | `heartbeat` | Refreshes presence; `{ok, timestamp}` |
+| client -> server | `join_room` | `{"room": ...}` where the room is `global`, `user:<id>` (own id only), `task:<id>` (only if `can_access_task`), or `team:<id>` (member, or Admin/Manager). Anything else is `{"ok": false, "error": "Room access denied"}` |
+| client -> server | `sync` | `{"lastEventId": n}`; returns `{ok, events, lastEventId}` with task and team access re-checked and at most 200 events |
+| client -> server | `audit_sync` | `{"lastAuditLogId": n}`; replays audit rows through the same `ANY`/`TEAM`/`OWN` scope as the audit page. Refused with `{"ok": false, "error": "Unauthorized"}` without `audit_logs.view` |
+
+`audit_log_event` is emitted after the transaction commits, to each connected
+user for whom the row is in scope, so two browsers open on the same page both
+receive the same event and a user outside the scope receives nothing.
+
 ## Audit events
 
 The audit log uses the existing `audit_logs` columns. Current event catalog:
@@ -151,6 +261,20 @@ $env:TEST_MSSQL_ALLOW_WRITE = "1"
 .\.venv\Scripts\python.exe -m pytest tests/test_mssql_audit_integration.py -q
 ```
 
+With a local Express instance and Windows Authentication, use the same URL
+`.env.example` demonstrates, pointed at a throwaway database:
+
+```
+$env:TEST_MSSQL_URL = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DTaskHQ_test%3BTrusted_Connection%3Dyes%3BTrustServerCertificate%3Dyes%3B"
+```
+
+The integration layer has been run end to end against SQL Server 2025 (17.0.1)
+on `.\SQLEXPRESS` with a dedicated `TaskHQ_test` database: 6 passed, twice in a
+row with no rows left behind. It asserts the dialect is really `mssql` before it
+writes, uses the app's own `create_all` for the schema (additive only), and
+deletes exactly the ids it created, including the role ids it made, so repeated
+runs stay clean.
+
 When `TEST_MSSQL_URL` is set, `tests/conftest.py` points the whole application
 at that server and deselects every other test module, so the SQLite suite and
 the SQL Server suite never mix. The integration test asserts the dialect is
@@ -174,9 +298,45 @@ compiles it against the T-SQL dialect, where SQLAlchemy renders the offset and
 limit as a `ROW_NUMBER()` window rather than a literal
 `OFFSET ... ROWS FETCH FIRST ... ROWS ONLY` clause. The opt-in integration layer
 (see "SQL Server verification" above) runs the audit flows end to end against a
-real server. The default suite still runs on an isolated temporary SQLite
-database, because that is what keeps the fixtures safe; it does not replace a
-run against the deployed SQL Server version and ODBC driver.
+real server, covering scope filtering, username search, `entity_id`, both
+relative periods, paging across a page boundary, an out-of-scope detail returning
+`404`, and a scoped export. The default suite still runs on an isolated temporary
+SQLite database, because that is what keeps the fixtures safe; it does not
+replace a run against the deployed SQL Server version and ODBC driver.
+
+## Tests
+
+`tests/conftest.py` points the session at a throwaway SQLite database in a temp
+directory that is removed at the end, and moves `UPLOAD_FOLDER` there too, so no
+run touches `.env` or a real database. Run everything with:
+
+```
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+| Module | Covers |
+| --- | --- |
+| `test_rbac.py`, `test_password_compatibility.py` | Role resolution, password hashing and upgrades |
+| `test_realtime.py` | Socket.IO authentication, `sync`, and a refused `audit_sync` |
+| `test_file_storage.py` | Upload validation, storage paths, and downloads |
+| `test_audit_logs_scopes.py` | `ANY`/`TEAM`/`OWN` resolution, snapshot versus live lookups, fail-closed rows |
+| `test_audit_logs_pagination.py` | Ordering, paging, and the counter line |
+| `test_audit_logs_search_periods.py` | Search fields, `entity_id`, and the `today`/`7d` periods |
+| `test_audit_logs_filters.py` | Filter combinations and the carried links |
+| `test_audit_logs_readability.py` | Sentences, `before`/`after` diffs, and raw values |
+| `test_audit_logs_denial_coverage.py` | Denied edit, delete, status, comment, attachment, and out-of-scope access |
+| `test_audit_logs_live_stream.py` | Live insertion, replay protection, and the full-page case |
+| `test_audit_logs_multi_client.py` | Two tabs of one user, two users with different scopes, a user with no audit scope, and one client replaying while another is live |
+| `test_audit_logs_export.py` | CSV, xlsx, and pdf export, scope, and the export audit row |
+| `test_tasks_regression.py` | Task create/edit/delete/status/dependency validation, permission failures, list filters, and the side tables each write touches |
+| `test_workspace_regression.py` | Team membership and creation, automation, roles, users, notifications, the assistant API, the admin-only screens, and that every template compiles |
+| `test_mssql_audit_integration.py` | The always-on T-SQL dialect layer, plus the opt-in end-to-end run against a real server |
+
+`test_workspace_regression.py` includes a test that compiles every template.
+`templates/users.html` once held a Jinja set literal with a variable, `{user[7]}`,
+which Jinja cannot parse, so the users screen returned HTTP 500 for everyone;
+compiling all templates catches that class of defect without a signed-in request
+per page.
 
 ## Quick start
 
