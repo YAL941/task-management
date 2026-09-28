@@ -12,7 +12,7 @@
   </div>
     <div style="display: flex; gap: 10px; align-items: center;">
     {% if team.meeting_status == 'Live' %}
-      <a class="primary-action" href="{{ team.meeting_url }}" target="_blank" rel="noreferrer" style="background: #dc2626;">JOIN LIVE NOW <span>●</span></a>
+      <a class="primary-action" href="{{ team.meeting_url }}" target="_blank" rel="noopener noreferrer" style="background: #dc2626;">JOIN LIVE NOW <span>●</span></a>
       {% if can_manage_meetings %}
       <form action="{{ url_for('end_meeting', team_id=team.id) }}" method="POST" style="display:inline;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -102,7 +102,7 @@
       </div>
       <div>
         <small>Meeting room</small>
-        {% if team.meeting_url %}<a href="{{ team.meeting_url }}" target="_blank" rel="noreferrer">Open link</a>{% else %}<span>No room set</span>{% endif %}
+        {% if team.meeting_url %}<a href="{{ team.meeting_url }}" target="_blank" rel="noopener noreferrer">Open link</a>{% else %}<span>No room set</span>{% endif %}
       </div>
       <div>
         <small>Members</small>

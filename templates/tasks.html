@@ -136,16 +136,19 @@
                             @click="window.location.href = '{{ url_for('task_view', task_id=task[0]) }}'"
                             data-task-id="{{ task[0] }}"
                             data-task-status="{{ t_status }}"
+                            {# `|tojson` on every value: a title or a name holding an
+                               apostrophe would otherwise close the JavaScript string
+                               and inject into the expression. #}
                             x-show="(
                                 activeTab === 'all' ||
-                                ((activeTab === 'inbox' || activeTab === 'received') && '{{ t_assignee }}' === '{{ session.get('username') }}') ||
-                                (activeTab === 'sent' && '{{ t_sender_id }}' === '{{ session.get('user_id') }}') ||
-                                (activeTab === 'replied' && ('{{ t_has_replied }}' === 'True' || '{{ t_has_replied }}' === '1')) ||
+                                ((activeTab === 'inbox' || activeTab === 'received') && {{ t_assignee | tojson }} === {{ session.get('username') | tojson }}) ||
+                                (activeTab === 'sent' && {{ t_sender_id | tojson }} === {{ session.get('user_id') | tojson }}) ||
+                                (activeTab === 'replied' && ({{ t_has_replied | tojson }} === true)) ||
                                 (activeTab === 'urgent')
                             ) &&
-                            (searchQuery === '' || '{{ t_title | lower }}'.includes(searchQuery.toLowerCase())) &&
-                            (statusFilter === 'All' || '{{ t_status }}' === statusFilter) &&
-                            (priorityFilter === 'All' || '{{ t_priority }}' === priorityFilter)">
+                            (searchQuery === '' || ({{ t_title | lower | tojson }}).includes(searchQuery.toLowerCase())) &&
+                            (statusFilter === 'All' || {{ t_status | tojson }} === statusFilter) &&
+                            (priorityFilter === 'All' || {{ t_priority | tojson }} === priorityFilter)">
                             
                             <td class="px-6 py-4 font-medium text-gray-500">{{ task[0] }}</td>
                             <td class="px-6 py-4 font-medium text-gray-900">{{ task[1] }}</td>
@@ -243,7 +246,10 @@
                     <div class="mt-1 p-3 bg-gray-50 rounded-lg border border-gray-200 text-gray-700 text-xs whitespace-pre-wrap" x-text="selectedTask.description"></div>
                 </div>
 
-                <form x-show="selectedTask.can_change_status" :action="'/update_task_status/' + selectedTask.id + '/' + statusAction" method="POST" class="border-t border-gray-100 pt-4 space-y-3">
+                {# A status change is a decision other people act on, so the
+                   irreversible ones ask first. The confirmation is on submit,
+                   which is why a keyboard user gets it too. #}
+                <form x-show="selectedTask.can_change_status" :action="'/update_task_status/' + selectedTask.id + '/' + statusAction" method="POST" class="border-t border-gray-100 pt-4 space-y-3" x-data="{}" @submit="if (['Completed', 'Rejected'].includes(statusAction) && !window.confirm('Confirm this status change and notify the sender?')) $event.preventDefault()">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <div>
                         <label class="block text-xs font-medium text-gray-500 uppercase mb-1">Change status</label>
@@ -271,7 +277,7 @@
                         <span class="text-xs font-medium uppercase text-gray-500">Sender controls</span>
                         <a :href="'/edit_task/' + selectedTask.id" class="rounded-lg border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-50">Edit task</a>
                     </div>
-                    <form :action="'/delete_task/' + selectedTask.id" method="POST" class="space-y-2">
+                    <form :action="'/delete_task/' + selectedTask.id" method="POST" class="space-y-2" data-confirm="Delete this task? Its comments and attachments go with it and this cannot be undone.">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <textarea name="comment" x-model="deleteComment" required rows="2" class="w-full rounded-lg border border-red-200 px-3 py-2 text-sm text-gray-700 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500" placeholder="Add a reason before deleting..."></textarea>
                         <button type="submit" class="rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-red-700">Delete task</button>

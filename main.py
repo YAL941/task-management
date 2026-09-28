@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.request import Request as UrlRequest, urlopen
 
 from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for, abort, has_request_context
+from werkzeug.exceptions import HTTPException, InternalServerError
 
 from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room, leave_room
@@ -902,6 +903,26 @@ def can_access_task(user_id, task):
     return bool(task.user_id == user_id or task.creator_id == user_id or team_member)
 
 
+def can_change_task_status(user_id, task):
+    """Only the person the task is assigned to may change its status.
+
+    The business rule is that the person who sends a task does not decide when
+    it is done: they follow its progress and comment on it instead. The rule is
+    absolute, so it holds for an admin and for a manager as well, and the only
+    case where the sender can move the task is when they are also the assignee.
+
+    `tasks.change_status` is still required on top of this, so an assignee
+    without the grant cannot change the status either. Both the route and the
+    templates ask this one function, which is why a hidden button and a refused
+    POST can never disagree.
+    """
+    if not task or not task.user_id:
+        return False
+    if task.user_id != user_id:
+        return False
+    return has_permission(user_id, "tasks.change_status", task)
+
+
 @app.route("/api/realtime/token")
 def realtime_auth_token():
     if not session.get("user_id"):
@@ -1411,6 +1432,73 @@ def add_security_headers(response):
     return response
 
 
+def _wants_json():
+    """True for the XHR routes, which must not receive an HTML error page."""
+    if request.path.startswith("/api/"):
+        return True
+    if request.is_json:
+        return True
+    best = request.accept_mimetypes.best_match(["application/json", "text/html"])
+    return best == "application/json" and request.accept_mimetypes[best] > request.accept_mimetypes["text/html"]
+
+
+@app.errorhandler(400)
+def handle_bad_request(error):
+    if _wants_json():
+        return jsonify_error("Bad request", 400)
+    flash("That request could not be understood. Please try again.", "danger")
+    return redirect(url_for("tasks"))
+
+
+@app.errorhandler(403)
+def handle_forbidden(error):
+    if _wants_json():
+        return jsonify_error("Forbidden", 403)
+    return render_template("error.html", code=403, title="Not allowed",
+                           message="You do not have permission to open this page."), 403
+
+
+@app.errorhandler(404)
+def handle_not_found(error):
+    if _wants_json():
+        return jsonify_error("Not found", 404)
+    return render_template("error.html", code=404, title="Page not found",
+                           message="The page you asked for does not exist, or it moved."), 404
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    """Show a readable page and keep the detail in the log, never in the browser.
+
+    A raw traceback used to reach the user: an unhandled Jinja or database
+    failure returned a 500 page with the exception text, which leaks schema
+    names and file paths. The details go to the application log instead, and the
+    user gets a page that says what happened and offers a way back.
+    """
+    # A raised HTTPException that has no handler of its own (405, 413, ...) is
+    # still a deliberate answer, not a crash, so it passes through.
+    if isinstance(error, HTTPException) and not isinstance(error, InternalServerError):
+        return error
+    app.logger.exception("Unhandled error on %s %s", request.method, request.path)
+    try:
+        record_access_denial("application_error", "request")
+    except Exception:  # noqa: BLE001 - the audit write must never mask the original error
+        db.session.rollback()
+    if _wants_json():
+        return {"ok": False, "error": "Something went wrong on our side. Please try again."}, 500
+    return render_template(
+        "error.html",
+        code=500,
+        title="Something went wrong",
+        message="The page could not be loaded because of a problem on our side. Nothing you did caused it.",
+    ), 500
+
+
+def jsonify_error(message, status_code):
+    response = {"ok": False, "error": message}
+    return response, status_code
+
+
 def login_required(view):
     @wraps(view)
     def wrapped_view(*args, **kwargs):
@@ -1420,17 +1508,6 @@ def login_required(view):
             return redirect(url_for("login"))
         return view(*args, **kwargs)
     return wrapped_view
-
-
-def permission_required(permission, resource=None):
-    user_id = session.get("user_id")
-    target = resource() if callable(resource) else resource
-    if not has_permission(user_id, permission, target):
-        if request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.is_json:
-            return {"ok": False, "error": "You are not authorized for this action.", "permission": permission}, 403
-        flash("You do not have permission to perform this action.", "danger")
-        return redirect(url_for("tasks"))
-    return None
 
 
 def admin_required(view):
@@ -1921,6 +1998,8 @@ def task_view(task_id):
     attachments = Attachment.query.filter_by(task_id=task.id).order_by(Attachment.id.asc()).all()
     activity_logs = AuditLog.query.filter_by(entity="task", entity_id=task.id).order_by(AuditLog.id.desc()).limit(100).all()
     users = {user.id: user for user in User.query.order_by(User.username).all()}
+    # One query for the bell, not two: the unread rows are the count.
+    shared = get_shared_data()
     return render_template(
         "task_details.html",
         task=task,
@@ -1931,10 +2010,10 @@ def task_view(task_id):
         attachments=attachments,
         can_delete_attachments=has_permission(session["user_id"], "attachments.delete", task),
         has_permission_upload=has_permission(session["user_id"], "attachments.upload", task),
-        can_change_status=has_permission(session["user_id"], "tasks.change_status", task),
+        can_change_status=can_change_task_status(session["user_id"], task),
         can_manage_task=has_permission(session["user_id"], "tasks.edit", task),
-        notifications=get_shared_data()[0],
-        unread_count=get_shared_data()[1],
+        notifications=shared[0],
+        unread_count=shared[1],
     )
 
 
@@ -2815,6 +2894,8 @@ def roles():
     role_rows = []
     for role in Role.query.order_by(Role.name).all():
         role_rows.append({"role": role, "permissions": {row.key: rp.scope for rp, row in db.session.query(RolePermission, Permission).join(Permission, Permission.id == RolePermission.permission_id).filter(RolePermission.role_id == role.id).all()}})
+    # One query for the bell, not two: the unread rows are the count.
+    shared = get_shared_data()
     return render_template(
         "roles.html",
         role_rows=role_rows,
@@ -2823,8 +2904,8 @@ def roles():
         permission_catalog=PERMISSION_CATALOG if has_permission(session["user_id"], "permissions.view") else {},
         can_view_permissions=has_permission(session["user_id"], "permissions.view"),
         scopes=sorted(PERMISSION_SCOPES),
-        notifications=get_shared_data()[0],
-        unread_count=get_shared_data()[1],
+        notifications=shared[0],
+        unread_count=shared[1],
     )
 
 
@@ -3014,8 +3095,10 @@ def tasks():
                 "assignee": assignee.username if assignee else "Unassigned",
                 "assignee_id": focused.user_id or "",
                 "sender_id": focused.creator_id or "",
-                "can_change_status": session.get("role") == "Admin" or (focused.user_id == session["user_id"] and focused.creator_id != session["user_id"]),
-                "can_manage_task": session.get("role") == "Admin" or focused.creator_id == session["user_id"],
+                # Both flags come from the same checks the routes enforce, so the
+                # modal can never offer an action the backend would refuse.
+                "can_change_status": can_change_task_status(session["user_id"], focused),
+                "can_manage_task": has_permission(session["user_id"], "tasks.edit", focused),
                 "priority": focused.priority or "Medium",
                 "status": focused.status or "Pending",
                 "due_date": focused.due_date or "",
@@ -3143,9 +3226,9 @@ def update_status(id, new_status):
         flash("Invalid status.", "danger")
         return redirect(url_for("tasks"))
     task = db.session.get(Task, id)
-    if not task or not has_permission(session["user_id"], "tasks.change_status", task):
+    if not task or not can_change_task_status(session["user_id"], task):
         record_access_denial("task_status_change_forbidden", "task", task.id if task else id)
-        flash("You do not have permission to update this task.", "danger")
+        flash("Only the person this task is assigned to can change its status.", "danger")
         return redirect(url_for("tasks"))
     comment_body = request.form.get("comment", "").strip()
     if new_status in {"Completed", "Rejected"} and not comment_body:
@@ -3765,6 +3848,8 @@ def audit_log_detail(audit_log_id):
     actor = db.session.get(User, audit_log.user_id) if audit_log.user_id else None
     resource_url = audit_resource_url(audit_log, session["user_id"])
     result, reason = audit_result_reason(audit_log)
+    # One query for the bell, not two: the unread rows are the count.
+    shared = get_shared_data()
     return render_template(
         "audit_log_detail.html",
         audit_log=audit_log,
@@ -3774,8 +3859,8 @@ def audit_log_detail(audit_log_id):
         audit_reason=reason,
         audit_message_text=audit_message(audit_log, actor.username if actor else "System"),
         audit_change_rows=audit_changes(audit_log),
-        notifications=get_shared_data()[0],
-        unread_count=get_shared_data()[1],
+        notifications=shared[0],
+        unread_count=shared[1],
     )
 
 

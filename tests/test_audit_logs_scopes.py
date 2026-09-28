@@ -470,7 +470,14 @@ def test_task_edit_audits_real_changes_and_skips_noops(audit_scope_scenario):
         status_before = AuditLog.query.filter_by(
             entity="task", entity_id=task_id, action="status_changed"
         ).count()
-    unchanged_status = client.post(
+    # The status is the assignee's to change, so the status calls run as the
+    # assignee while the field edits above stay with the sender. The audit row
+    # has to look the same either way, which is what this test checks.
+    grant_permissions(users["assignee"], ("tasks.change_status",), cleanup_ids, scope="OWN")
+    assignee_client = scoped_client(users["assignee"])
+    with assignee_client.session_transaction() as session:
+        session["csrf_token"] = "scope-task-edit-csrf"
+    unchanged_status = assignee_client.post(
         f"/update_task_status/{task_id}/Pending",
         data={"csrf_token": "scope-task-edit-csrf"},
         follow_redirects=False,
@@ -479,7 +486,7 @@ def test_task_edit_audits_real_changes_and_skips_noops(audit_scope_scenario):
     with app.app_context():
         assert AuditLog.query.filter_by(entity="task", entity_id=task_id, action="status_changed").count() == status_before
 
-    changed_status = client.post(
+    changed_status = assignee_client.post(
         f"/update_task_status/{task_id}/In%20Progress",
         data={"csrf_token": "scope-task-edit-csrf"},
         follow_redirects=False,

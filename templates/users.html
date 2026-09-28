@@ -45,7 +45,9 @@
                 </thead>
                 <tbody class="divide-y divide-gray-200 text-sm">
                 {% for user in users_list %}
-                    <tr x-show="search === '' || '{{ user[1] }} {{ user[2] }} {{ user[3] }}'.toLowerCase().includes(search.toLowerCase())">
+                    {# `|tojson` emits a safe JavaScript literal, so a name holding
+                       a quote or a tag cannot break out of the expression. #}
+                    <tr x-show="search === '' || ({{ ((user[1] or '') ~ ' ' ~ (user[2] or '') ~ ' ' ~ (user[3] or '')) | tojson }}).toLowerCase().includes(search.toLowerCase())">
                         <td class="px-5 py-4 text-gray-500">{{ user[0] }}</td>
                         <td class="px-5 py-4 font-medium text-gray-900">{{ user[1] }} {{ user[2] }}</td>
                         <td class="px-5 py-4 text-gray-600">{{ user[3] }}</td>

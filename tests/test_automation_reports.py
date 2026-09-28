@@ -110,7 +110,17 @@ def automation_scenario():
                 db.session.add(UserRole(user_id=user.id, role_id=role.id, assigned_by=admin.id, created_at=CREATED_AT))
             return user
 
-        assignee = make_user("Assignee")
+        # The assignee holds the own-level grants the seeded `User` role has, so
+        # the person a task is assigned to is the one who can work on it: the
+        # status rule makes the assignee the actor, not the admin who sent it.
+        assignee = make_user(
+            "Assignee",
+            permission_keys=(
+                ("tasks.view", "OWN"),
+                ("tasks.change_status", "OWN"),
+                ("comments.create", "OWN"),
+            ),
+        )
         other = make_user("Other")
         report_only = make_user("ReportOnly", permission_keys=(("reports.view", "ANY"),))
         manage_without_reports = make_user("Manager", permission_keys=(("permissions.manage", "ANY"),))
@@ -226,7 +236,8 @@ def test_a_rule_fires_in_the_status_request_and_reaches_the_assignee(automation_
         db.session.commit()
         task_id = task.id
 
-    client = session_client(automation_scenario["admin_id"], role="Admin")
+    # The assignee moves their own task, which is the only person allowed to.
+    client = session_client(automation_scenario["assignee_id"])
     response = client.post(
         f"/update_task_status/{task_id}/Completed",
         data={"csrf_token": CSRF, "comment": "Done by the automation test"},
@@ -235,6 +246,7 @@ def test_a_rule_fires_in_the_status_request_and_reaches_the_assignee(automation_
     assert response.status_code == 302
 
     with app.app_context():
+        assert db.session.get(Task, task_id).status == "Completed"
         messages = [row.message for row in Notification.query.filter_by(user_id=automation_scenario["assignee_id"]).all()]
         assert any("matched task: Fires on completion" in message for message in messages)
         # The creator must not be the recipient here.
@@ -259,7 +271,7 @@ def test_the_recipient_is_pushed_the_automation_notification(automation_scenario
         assert listener.is_connected()
         listener.get_received()
 
-        client = session_client(automation_scenario["admin_id"], role="Admin")
+        client = session_client(automation_scenario["assignee_id"])
         response = client.post(
             f"/update_task_status/{task_id}/Completed",
             data={"csrf_token": CSRF, "comment": "Pushed"},

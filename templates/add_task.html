@@ -58,19 +58,35 @@
             };
             const renderFiles = () => {
                 const files = Array.from(fileInput.files || []);
+                // The file name is user controlled, so the list is built from
+                // text nodes. An innerHTML string here would run a file called
+                // `<img onerror=...>`.
+                selectedFiles.replaceChildren();
                 if (!files.length) {
-                    selectedFiles.innerHTML = '<div style="padding:10px 12px; border:1px dashed #cbd5e1; border-radius:10px; color:var(--muted); background:#fff;">No files selected yet.</div>';
+                    const empty = document.createElement('div');
+                    empty.style.cssText = 'padding:10px 12px; border:1px dashed #cbd5e1; border-radius:10px; color:var(--muted); background:#fff;';
+                    empty.textContent = 'No files selected yet.';
+                    selectedFiles.append(empty);
                     return;
                 }
-                selectedFiles.innerHTML = files.map((file) => `
-                    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:10px; background:#fff;">
-                        <div style="min-width:0; overflow:hidden;">
-                            <div style="font-weight:600; overflow-wrap:anywhere;">${file.name}</div>
-                            <small style="color:var(--muted); display:block;">${file.type || 'File'} · ${formatSize(file.size)}</small>
-                        </div>
-                        <span style="color:#16a34a; font-weight:600;">Ready</span>
-                    </div>
-                `).join('');
+                files.forEach((file) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #edf2f7; border-radius:10px; background:#fff;';
+                    const info = document.createElement('div');
+                    info.style.cssText = 'min-width:0; overflow:hidden;';
+                    const name = document.createElement('div');
+                    name.style.cssText = 'font-weight:600; overflow-wrap:anywhere;';
+                    name.textContent = file.name;
+                    const meta = document.createElement('small');
+                    meta.style.cssText = 'color:var(--muted); display:block;';
+                    meta.textContent = `${file.type || 'File'} · ${formatSize(file.size)}`;
+                    info.append(name, meta);
+                    const ready = document.createElement('span');
+                    ready.style.cssText = 'color:#16a34a; font-weight:600;';
+                    ready.textContent = 'Ready';
+                    row.append(info, ready);
+                    selectedFiles.append(row);
+                });
             };
             fileInput.addEventListener('change', renderFiles);
             ['dragenter', 'dragover'].forEach((eventName) => {

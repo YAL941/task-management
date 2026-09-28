@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - TaskHQ{% endblock %}
+
+{% block content %}
+<div class="card-surface" style="max-width:640px; margin:48px auto; text-align:center;">
+    <p class="eyebrow">Error {{ code }}</p>
+    <h1 style="font-size:26px; margin:8px 0 10px;">{{ title }}</h1>
+    <p class="page-subtitle" style="margin-bottom:22px;">{{ message }}</p>
+    <div class="quick-actions" style="justify-content:center;">
+        <a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks</a>
+        <a href="{{ url_for('index') }}" class="primary-action">Dashboard</a>
+    </div>
+    <p class="muted-cell" style="margin-top:22px; font-size:13px;">
+        Reference: <code>{{ code }}</code>. If this keeps happening, send the reference to your administrator.
+    </p>
+</div>
+{% endblock %}

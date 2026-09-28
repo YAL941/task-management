@@ -135,9 +135,18 @@ def task_scenario():
             creator_id=admin.id,
             user_id=member.id,
         )
-        db.session.add_all([owned, unassigned, blocker])
+        # Assigned to the member with no prerequisite, so completing it is only
+        # about the comment rule and the assignee rule.
+        free = Task(
+            title="Regression free task",
+            status="Pending",
+            priority="Medium",
+            creator_id=admin.id,
+            user_id=member.id,
+        )
+        db.session.add_all([owned, unassigned, blocker, free])
         db.session.flush()
-        created["tasks"].extend([owned.id, unassigned.id, blocker.id])
+        created["tasks"].extend([owned.id, unassigned.id, blocker.id, free.id])
 
         # "Blocked By": owned depends on blocker, so the blocker is its predecessor.
         dependency = TaskDependency(
@@ -160,6 +169,7 @@ def task_scenario():
             "owned_id": owned.id,
             "unassigned_id": unassigned.id,
             "blocker_id": blocker.id,
+            "free_id": free.id,
             "dependency_id": dependency.id,
         }
 
@@ -318,8 +328,8 @@ def test_status_change_rejects_unknown_status_and_keeps_the_old_one(task_scenari
 
 
 def test_completing_requires_a_comment_and_keeps_the_status(task_scenario):
-    client = session_client(task_scenario["admin_id"], role="Admin")
-    task_id = task_scenario["unassigned_id"]
+    client = session_client(task_scenario["member_id"])
+    task_id = task_scenario["free_id"]
     without_comment = client.post(
         f"/update_task_status/{task_id}/Completed",
         data={"csrf_token": CSRF},
@@ -342,6 +352,86 @@ def test_completing_requires_a_comment_and_keeps_the_status(task_scenario):
         assert task.completed_at is not None
         assert Comment.query.filter_by(task_id=task_id).count() == 1
         assert [row.action for row in audit_rows("status_changed", task_id)] == ["status_changed"]
+
+
+def test_the_sender_cannot_change_the_status_of_a_task_they_sent(task_scenario):
+    """The rule is absolute: the assignee decides, the sender only follows.
+
+    The admin sent this task and is assigned to nobody, and an admin who cannot
+    change it proves the check is not a permission lookup: it is the assignment
+    that decides. A crafted POST has to be refused exactly like the button being
+    hidden, and nothing may be written.
+    """
+    task_id = task_scenario["owned_id"]
+    for user_id, role in ((task_scenario["admin_id"], "Admin"), (task_scenario["powerless_id"], "User")):
+        client = session_client(user_id, role=role)
+        refused = client.post(
+            f"/update_task_status/{task_id}/In Progress",
+            data={"csrf_token": CSRF, "comment": "The sender is trying to close their own task"},
+            follow_redirects=False,
+        )
+        assert refused.status_code == 302
+    with app.app_context():
+        task = db.session.get(Task, task_id)
+        assert task.status == "Pending"
+        assert task.completed_at is None
+        # The comment is not written either: the refusal happens before the body
+        # is read, so a refused status change leaves no trace on the task.
+        assert Comment.query.filter_by(task_id=task_id).count() == 0
+        assert audit_rows("status_changed", task_id) == []
+        denial = (
+            AuditLog.query.filter_by(action="access_denied", entity="task", entity_id=task_id)
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert denial is not None
+        assert "task_status_change_forbidden" in denial.new_value
+
+
+def test_an_unassigned_task_has_nobody_who_can_change_its_status(task_scenario):
+    """A task with no assignee cannot be moved until it is assigned.
+
+    The rule names the assignee as the only person who may change the status, so
+    a task that has none is not the sender's to move either. This is the strict
+    reading of the rule; `add_task` always requires an assignee, so only legacy
+    and imported rows reach this state.
+    """
+    task_id = task_scenario["unassigned_id"]
+    for user_id, role in ((task_scenario["admin_id"], "Admin"), (task_scenario["member_id"], "User")):
+        client = session_client(user_id, role=role)
+        assert client.post(
+            f"/update_task_status/{task_id}/In Progress",
+            data={"csrf_token": CSRF, "comment": "Moving a task nobody owns"},
+            follow_redirects=False,
+        ).status_code == 302
+    with app.app_context():
+        assert db.session.get(Task, task_id).status == "Pending"
+        assert Comment.query.filter_by(task_id=task_id).count() == 0
+        assert audit_rows("status_changed", task_id) == []
+
+
+def test_the_sender_who_is_also_the_assignee_may_change_the_status(task_scenario):
+    """Sender and assignee in one person is the one case the rule allows."""
+    task_id = task_scenario["blocker_id"]
+    with app.app_context():
+        task = db.session.get(Task, task_id)
+        assert task.creator_id == task_scenario["admin_id"]
+        assert task.user_id == task_scenario["member_id"]
+        task.creator_id = task_scenario["member_id"]
+        db.session.commit()
+    try:
+        client = session_client(task_scenario["member_id"])
+        assert client.post(
+            f"/update_task_status/{task_id}/In Progress",
+            data={"csrf_token": CSRF},
+            follow_redirects=False,
+        ).status_code == 302
+        with app.app_context():
+            assert db.session.get(Task, task_id).status == "In Progress"
+    finally:
+        with app.app_context():
+            db.session.get(Task, task_id).creator_id = task_scenario["admin_id"]
+            db.session.commit()
 
 
 def test_completion_is_blocked_while_a_prerequisite_is_open(task_scenario):
