@@ -340,8 +340,23 @@ def test_notification_feed_only_returns_the_callers_own_rows(workspace):
     with app.app_context():
         assert db.session.get(Notification, notification_id).is_read is True
 
+    # The outsider has no `notifications.view`, so the feed is closed and the
+    # refusal is recorded rather than returning an empty list.
     outsider_client = session_client(workspace["outsider_id"])
-    assert outsider_client.get("/notifications/feed").get_json()["notifications"] == []
+    refused = outsider_client.get("/notifications/feed")
+    assert refused.status_code == 403
+    assert refused.get_json() == {"ok": False, "error": "Forbidden"}
+    assert outsider_client.post(
+        "/notifications/read",
+        data={"csrf_token": CSRF, "notification_ids": [notification_id]},
+        content_type="application/x-www-form-urlencoded",
+    ).status_code == 403
+    assert outsider_client.get(f"/notifications/{notification_id}", follow_redirects=False).status_code == 302
+    with app.app_context():
+        denial = AuditLog.query.filter_by(action="access_denied", entity="notification").order_by(AuditLog.id.desc()).first()
+        assert denial is not None
+        assert "notifications_view_forbidden" in denial.new_value
+        assert db.session.get(Notification, notification_id).is_read is True
 
 
 def test_marking_notifications_read_needs_a_csrf_token(workspace):

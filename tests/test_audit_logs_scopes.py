@@ -296,6 +296,27 @@ def scoped_client(user_id):
     return client
 
 
+def grant_permissions(user_id, keys, cleanup_ids, scope="ANY"):
+    """Give a user extra grants through a throwaway role."""
+    with app.app_context():
+        role = Role(
+            name=f"scope_extra_{uuid4().hex[:8]}",
+            description="Extra grants for a scope test",
+            is_system=False,
+            created_at="2026-09-28T10:00:00",
+        )
+        db.session.add(role)
+        db.session.flush()
+        cleanup_ids["roles"].append(role.id)
+        for key in keys:
+            permission = Permission.query.filter_by(key=key).first()
+            assert permission is not None, key
+            db.session.add(RolePermission(role_id=role.id, permission_id=permission.id, scope=scope))
+        db.session.add(UserRole(user_id=user_id, role_id=role.id, assigned_by=user_id, created_at="2026-09-28T10:00:00"))
+        db.session.commit()
+        return role.id
+
+
 def test_own_scope_uses_owner_snapshots_and_fails_closed_for_historical_rows(audit_scope_scenario):
     users = audit_scope_scenario["users"]
     markers = audit_scope_scenario["markers"]
@@ -403,6 +424,10 @@ def test_task_edit_audits_real_changes_and_skips_noops(audit_scope_scenario):
     client = scoped_client(users["creator"])
     with client.session_transaction() as session:
         session["csrf_token"] = "scope-task-edit-csrf"
+    # Priority and due date are separate grants now, and this test is about the
+    # audit shape rather than the refusal; `test_field_level_task_permissions`
+    # covers the refusal.
+    grant_permissions(users["creator"], ("tasks.change_priority", "tasks.change_due_date"), cleanup_ids)
 
     form_data = {
         "csrf_token": "scope-task-edit-csrf",

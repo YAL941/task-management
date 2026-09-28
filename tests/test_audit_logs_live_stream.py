@@ -1,5 +1,13 @@
-"""Coverage for the live audit stream delivered to an open /audit-logs page."""
+"""Coverage for the live audit stream delivered to an open /audit-logs page.
 
+`publish_committed_audit_logs` runs synchronously after the commit on SQLite (the
+conftest suite database) and from a background task on every other dialect, so on
+SQL Server the packet arrives just after the request returns. The waits below
+cover both, and the negative case drains for the full grace window so a late
+arrival still fails the test.
+"""
+
+import time
 from uuid import uuid4
 
 import pytest
@@ -23,6 +31,31 @@ from main import (
 
 # Rows this module creates, so the autouse fixture can remove exactly those.
 _CREATED = {"users": [], "roles": [], "logs": []}
+
+# The app publishes a committed audit row inline on SQLite but from a background
+# task on every other dialect, so on SQL Server the packet lands shortly after
+# the request returns rather than inside it. The wait keeps the assertions about
+# *who* the event reached valid on both backends.
+PUBLISH_GRACE_SECONDS = 5.0
+
+
+def wait_for_audit_packets(client, timeout=PUBLISH_GRACE_SECONDS):
+    deadline = time.monotonic() + timeout
+    while True:
+        packets = [packet for packet in client.get_received() if packet["name"] == "audit_log_event"]
+        if packets or time.monotonic() >= deadline:
+            return packets
+        time.sleep(0.05)
+
+
+def wait_for_no_audit_packets(client, timeout=PUBLISH_GRACE_SECONDS):
+    """Drain for the whole grace window, so a late arrival still fails the test."""
+    deadline = time.monotonic() + timeout
+    packets = []
+    while time.monotonic() < deadline:
+        packets.extend(packet for packet in client.get_received() if packet["name"] == "audit_log_event")
+        time.sleep(0.05)
+    return packets
 
 
 def _session_client(user_id, username="live-test"):
@@ -178,8 +211,7 @@ def test_live_audit_event_carries_every_field_the_client_row_renders():
         db.session.commit()
         log_id = db.session.query(db.func.max(AuditLog.id)).scalar()
 
-    packets = client.get_received()
-    audit_packets = [packet for packet in packets if packet["name"] == "audit_log_event"]
+    audit_packets = wait_for_audit_packets(client)
     assert audit_packets, "expected a live audit_log_event for the scoped viewer"
     payload = audit_packets[-1]["args"][0]
     for field in ("sequence", "eventId", "timestamp", "actorName", "entityType", "entityId",
@@ -223,12 +255,12 @@ def test_live_audit_event_is_not_sent_to_user_without_audit_scope():
         db.session.commit()
         log_id = db.session.query(db.func.max(AuditLog.id)).scalar()
 
-    packets = client.get_received()
-    control_packets = control_client.get_received()
+    control_packets = wait_for_audit_packets(control_client)
+    packets = wait_for_no_audit_packets(client)
     # The scoped admin proves the event really was published, so the empty
     # result for the unprivileged user is a real scope rejection.
-    assert any(packet["name"] == "audit_log_event" for packet in control_packets)
-    assert not [packet for packet in packets if packet["name"] == "audit_log_event"]
+    assert control_packets
+    assert not packets
     client.disconnect()
     control_client.disconnect()
 

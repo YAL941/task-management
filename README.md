@@ -64,6 +64,43 @@ with as matching only an `ANY` grant, and fails closed when no grant exists.
 of the same name, so a legacy value of `User` still yields the `User` role's
 twelve own-level grants.
 
+### Enforced grants, and the keys with no screen behind them
+
+Every key below is checked by a route and refuses with a recorded
+`*_forbidden` reason code:
+
+| Key | Enforced at |
+| --- | --- |
+| `tasks.view` | `/tasks`, `/tasks/<id>/view` |
+| `tasks.create` | `/add_task` |
+| `tasks.edit`, `tasks.edit_own` | `/edit_task/<id>` |
+| `tasks.change_status` | `/update_task_status/<id>/<status>` |
+| `tasks.change_priority` | `edit_task`, when the priority field actually changes |
+| `tasks.change_due_date` | `edit_task`, when the due date field actually changes |
+| `tasks.delete`, `tasks.delete_own` | `/delete_task/<id>` |
+| `tasks.assign`, `tasks.assign_own` | `/add_task`, for the chosen assignee |
+| `tasks.export` | `/export/tasks.<fmt>` |
+| `attachments.view`, `.upload`, `.delete` | The three attachment routes |
+| `comments.view`, `comments.create` | `/tasks/<id>/comments` |
+| `notifications.view` | `/notifications/feed`, `/notifications/read`, `/notifications/<id>` |
+| `users.view`, `.create`, `.edit`, `.delete`, `.reset_password` | `/users`; a password reset is its own grant, not covered by `users.edit` |
+| `roles.view`, `.create`, `.edit`, `.delete`, `.assign` | `/roles` and `sync_user_roles` |
+| `permissions.manage` | `admin_required`: `/automation`, `/data`, `/export` |
+| `permissions.view` | The permission matrix on `/roles`; without it the roles are listed but not what each can be given |
+| `reports.view`, `reports.export` | `/reports`, `/analytics`, and `/export/reports.<fmt>` |
+| `audit_logs.view`, `audit_logs.export` | `/audit-logs`, its detail page, and the audit export |
+| `settings.view`, `settings.edit` | `/settings`, `/settings/test-email` |
+
+The remaining keys are **declared and grantable, but no screen acts on them
+yet**: `tasks.reassign`, `tasks.cancel`, `tasks.restore`, `tasks.archive`,
+`comments.edit`, `comments.delete`, `notifications.manage`, `reports.create`,
+`users.activate`, `users.deactivate`. They are listed here so granting one is
+not mistaken for a working control, and
+`tests/test_permission_enforcement.py` asserts this list stays inside the
+catalog. `users.activate` and `users.deactivate` in particular have no feature
+to bind to: `users` has no `is_active` column, and adding one is a schema
+change, which needs the database owner's approval like any other.
+
 ## Automation rules
 
 A rule is a small trigger: an event, a condition, a value, and an action. Rules
@@ -335,10 +372,34 @@ runs stay clean.
 
 When `TEST_MSSQL_URL` is set, `tests/conftest.py` points the whole application
 at that server and deselects every other test module, so the SQLite suite and
-the SQL Server suite never mix. The integration test asserts the dialect is
-really `mssql` before it writes, uses the app's own `create_all` for the schema
-(additive only), and deletes only the rows it created. Use a dedicated,
-disposable database.
+the SQL Server suite never mix. `TEST_MSSQL_FULL=1` runs every module against
+the server instead, which is the only way to find dialect differences outside
+the audit page; the integration test asserts the dialect is really `mssql`
+before it writes, uses the app's own `create_all` for the schema (additive
+only), and deletes only the rows it created. Use a dedicated, disposable
+database.
+
+A full run also drops every table and re-seeds first, because the suite's tests
+insert rows with a fixed `created_at` and then read the first page of a result:
+that only holds when nothing older is in the table, and a server database
+persists between runs the way a fresh temporary SQLite file does not. That reset
+needs all three of `TEST_MSSQL_URL`, `TEST_MSSQL_FULL=1`, and
+`TEST_MSSQL_ALLOW_WRITE=1`, and additionally refuses to run unless the database
+name contains `test` — a URL pointed at a real deployment is rejected rather
+than emptied. A full run without the write opt-in is rejected as well, rather
+than left to fail against a database that was not emptied.
+
+The full suite has been run on SQL Server 2025 (17.0.1) on `.\SQLEXPRESS`
+against a dedicated `TaskHQ_test` database: 123 passed, twice in a row. Two
+things only showed up there, and both are in the tests rather than the
+application:
+
+* `publish_committed_audit_logs` runs inline on SQLite but from a background
+  task on every other dialect, so on SQL Server a live packet arrives just
+  after the request returns. The live-stream tests now wait for the packet and
+  drain for a full grace window when the expectation is that nothing arrives.
+* SQLite hands every run a brand new database file; a server database has to be
+  emptied explicitly, which is what `TEST_MSSQL_FULL` does.
 
 ### Proposed schema change (approval required)
 
@@ -389,6 +450,7 @@ run touches `.env` or a real database. Run everything with:
 | `test_tasks_regression.py` | Task create/edit/delete/status/dependency validation, permission failures, list filters, and the side tables each write touches |
 | `test_workspace_regression.py` | Team membership and creation, automation, roles, users, notifications, the assistant API, the admin-only screens, and that every template compiles |
 | `test_automation_reports.py` | Rule firing inside the status request, the assignee as recipient, the live push and its dedupe marker, a silent repeated sweep, `changes_to` versus `equals`, `overdue`, unsupported rule combinations, and the report aggregate, period, scoping, and three export formats |
+| `test_permission_enforcement.py` | Each grant that had a role-screen checkbox but no check behind it: the two field-level task grants, `tasks.assign` versus `tasks.assign_own`, the two export grants, `notifications.view`, `users.reset_password`, `permissions.view`, and that the reserved keys are still grantable |
 | `test_mssql_audit_integration.py` | The always-on T-SQL dialect layer, plus the opt-in end-to-end run against a real server |
 
 `test_workspace_regression.py` includes a test that compiles every template.

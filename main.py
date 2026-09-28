@@ -464,6 +464,48 @@ def seed_rbac():
     db.session.commit()
 
 
+def seed_default_accounts():
+    """Create the default accounts and the RBAC roles, if they are missing.
+
+    The import-time bootstrap calls this after the schema exists, and a test
+    session that starts from an empty SQL Server database calls it again, so
+    both paths seed identically.
+    """
+    if not User.query.first():
+        db.session.add(User(
+            first_name="System",
+            last_name="Administrator",
+            username=os.environ.get("ADMIN_USERNAME", "admin"),
+            password_hash=generate_password_hash(os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")),
+            role="Admin",
+            created_at=datetime.now().isoformat(timespec="minutes"),
+        ))
+        db.session.commit()
+    default_accounts = (
+        ("admin", "Admin", "Admin", "Administrator"),
+        ("user", "User", "Standard", "User"),
+        ("manager", "Manager", "Task", "Manager"),
+    )
+    default_passwords = {
+        "admin": os.environ.get("ADMIN_PASSWORD", "Admin@12345"),
+        "user": os.environ.get("USER_PASSWORD", "User@12345"),
+        "manager": os.environ.get("MANAGER_PASSWORD", "Manager@12345"),
+    }
+    for username, role, first_name, last_name in default_accounts:
+        if not User.query.filter(func.lower(func.trim(User.username)) == username).first():
+            db.session.add(User(
+                first_name=first_name,
+                last_name=last_name,
+                username=username,
+                password_hash=generate_password_hash(default_passwords[username]),
+                role=role,
+                created_at=datetime.now().isoformat(timespec="minutes"),
+            ))
+    db.session.flush()
+    seed_rbac()
+    reconcile_live_meetings()
+
+
 def user_roles(user):
     if isinstance(user, int):
         user = db.session.get(User, user)
@@ -777,39 +819,7 @@ with app.app_context():
                 created_at=datetime.now().isoformat(timespec="seconds"),
             ))
     db.session.commit()
-    if not User.query.first():
-        db.session.add(User(
-            first_name="System",
-            last_name="Administrator",
-            username=os.environ.get("ADMIN_USERNAME", "admin"),
-            password_hash=generate_password_hash(os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")),
-            role="Admin",
-            created_at=datetime.now().isoformat(timespec="minutes"),
-        ))
-        db.session.commit()
-    default_accounts = (
-        ("admin", "Admin", "Admin", "Administrator"),
-        ("user", "User", "Standard", "User"),
-        ("manager", "Manager", "Task", "Manager"),
-    )
-    default_passwords = {
-        "admin": os.environ.get("ADMIN_PASSWORD", "Admin@12345"),
-        "user": os.environ.get("USER_PASSWORD", "User@12345"),
-        "manager": os.environ.get("MANAGER_PASSWORD", "Manager@12345"),
-    }
-    for username, role, first_name, last_name in default_accounts:
-        if not User.query.filter(func.lower(func.trim(User.username)) == username).first():
-            db.session.add(User(
-                first_name=first_name,
-                last_name=last_name,
-                username=username,
-                password_hash=generate_password_hash(default_passwords[username]),
-                role=role,
-                created_at=datetime.now().isoformat(timespec="minutes"),
-            ))
-    db.session.flush()
-    seed_rbac()
-    reconcile_live_meetings()
+    seed_default_accounts()
 
 
 def get_csrf_token():
@@ -1787,6 +1797,9 @@ def logout():
 @app.route("/notifications/read", methods=["POST"])
 @login_required
 def mark_notifications_read():
+    if not has_permission(session["user_id"], "notifications.view"):
+        record_access_denial("notifications_view_forbidden", "notification")
+        return {"ok": False, "error": "Forbidden"}, 403
     if not valid_csrf():
         return {"ok": False, "error": "Invalid request"}, 400
     unread_ids = [row.id for row in Notification.query.filter_by(user_id=session["user_id"], is_read=False).all()]
@@ -1807,6 +1820,9 @@ def mark_notifications_read():
 @app.route("/notifications/feed")
 @login_required
 def notifications_feed():
+    if not has_permission(session["user_id"], "notifications.view"):
+        record_access_denial("notifications_view_forbidden", "notification")
+        return {"ok": False, "error": "Forbidden"}, 403
     user_id = session["user_id"]
     notifications = Notification.query.filter_by(user_id=user_id).order_by(Notification.id.desc()).limit(20).all()
     unread_count = Notification.query.filter_by(user_id=user_id, is_read=False).count()
@@ -1830,6 +1846,9 @@ def notifications_feed():
 @app.route("/notifications/<int:notification_id>")
 @login_required
 def open_notification(notification_id):
+    if not has_permission(session["user_id"], "notifications.view"):
+        record_access_denial("notifications_view_forbidden", "notification", notification_id)
+        return redirect(url_for("tasks"))
     notification = Notification.query.filter_by(id=notification_id, user_id=session["user_id"]).first()
     if not notification:
         return redirect(url_for("tasks"))
@@ -2796,7 +2815,17 @@ def roles():
     role_rows = []
     for role in Role.query.order_by(Role.name).all():
         role_rows.append({"role": role, "permissions": {row.key: rp.scope for rp, row in db.session.query(RolePermission, Permission).join(Permission, Permission.id == RolePermission.permission_id).filter(RolePermission.role_id == role.id).all()}})
-    return render_template("roles.html", role_rows=role_rows, permission_catalog=PERMISSION_CATALOG, scopes=sorted(PERMISSION_SCOPES), notifications=get_shared_data()[0], unread_count=get_shared_data()[1])
+    return render_template(
+        "roles.html",
+        role_rows=role_rows,
+        # The full permission matrix is its own grant; without it the role
+        # screen lists the roles but not what each one can be given.
+        permission_catalog=PERMISSION_CATALOG if has_permission(session["user_id"], "permissions.view") else {},
+        can_view_permissions=has_permission(session["user_id"], "permissions.view"),
+        scopes=sorted(PERMISSION_SCOPES),
+        notifications=get_shared_data()[0],
+        unread_count=get_shared_data()[1],
+    )
 
 
 @app.route("/api/me/permissions")
@@ -2876,6 +2905,12 @@ def users():
             if role in VALID_ROLES and user.id != session["user_id"]:
                 user.role = role
             new_password = request.form.get("new_password", "")
+            if new_password and not has_permission(session["user_id"], "users.reset_password"):
+                # Resetting someone's password is its own grant, separate from
+                # editing their profile fields.
+                record_access_denial("users_reset_password_forbidden", "user", user.id)
+                flash("You do not have permission to reset a password.", "danger")
+                return redirect(url_for("users", view=view))
             if new_password:
                 if len(new_password) < 8:
                     flash("Password must contain at least 8 characters.", "danger")
@@ -3033,6 +3068,13 @@ def add_task():
     assigned_user_id = request.form.get("user_id", type=int)
     if not assigned_user_id or not User.query.get(assigned_user_id):
         flash("Enter a valid assignee user ID.", "danger")
+        return redirect(url_for("tasks"))
+    # Creating a task for someone else is an assignment; creating it for yourself
+    # is the self-service case the `_own` grant covers.
+    assign_key = "tasks.assign_own" if assigned_user_id == session["user_id"] else "tasks.assign"
+    if not (has_permission(session["user_id"], assign_key) or has_permission(session["user_id"], "tasks.assign")):
+        record_access_denial("task_assign_forbidden", "task")
+        flash("You do not have permission to assign a task to another user.", "danger")
         return redirect(url_for("tasks"))
     uploads = request.files.getlist("attachments")
     if uploads and any(upload and upload.filename for upload in uploads) and not has_permission(session["user_id"], "attachments.upload"):
@@ -3967,6 +4009,13 @@ def audit_export_rows(user_id):
 def export_data(resource, file_format):
     if resource not in {"tasks", "users", "teams", "reports", "audit_logs"} or file_format not in {"csv", "xlsx", "pdf"}:
         return {"ok": False, "error": "Unsupported export"}, 400
+    # Each resource carries its own export grant on top of `admin_required`.
+    if resource == "tasks" and not has_permission(session["user_id"], "tasks.export"):
+        record_access_denial("tasks_export_forbidden", "task")
+        return {"ok": False, "error": "You are not authorized to export tasks."}, 403
+    if resource == "reports" and not has_permission(session["user_id"], "reports.export"):
+        record_access_denial("reports_export_forbidden", "report")
+        return {"ok": False, "error": "You are not authorized to export reports."}, 403
     if resource == "reports":
         # A report is an aggregate, not a task dump, and it is scoped to the
         # caller exactly like the report screen.
@@ -4067,12 +4116,22 @@ def edit_task(id):
         return redirect(url_for("tasks"))
     old_values = {}
     new_values = {}
+    changed_fields = {}
     for field, value in (("title", title), ("priority", priority), ("due_date", due_date)):
-        previous_value = getattr(task, field)
-        if previous_value != value:
-            old_values[field] = previous_value
-            new_values[field] = value
-            setattr(task, field, value)
+        if getattr(task, field) != value:
+            changed_fields[field] = value
+    # A field the caller may not change blocks the whole submit, so a request
+    # cannot slip a priority or due date change past the check by also editing
+    # the title. Nothing has been written to the task at this point.
+    for field, permission in (("priority", "tasks.change_priority"), ("due_date", "tasks.change_due_date")):
+        if field in changed_fields and not has_permission(session["user_id"], permission, task):
+            record_access_denial(f"{permission.replace('.', '_')}_forbidden", "task", task.id)
+            flash(f"You do not have permission to change the task {field.replace('_', ' ')}.", "danger")
+            return redirect(url_for("tasks", focus=task.id))
+    for field, value in changed_fields.items():
+        old_values[field] = getattr(task, field)
+        new_values[field] = value
+        setattr(task, field, value)
 
     description = request.form.get("description", "").strip()
     previous_description = detail.description if detail and detail.description else ""

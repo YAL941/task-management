@@ -26,6 +26,7 @@
     </div>
     <input class="field" name="description" value="{{ item.role.description or '' }}" maxlength="255" aria-label="Role description">
     <div style="display:grid; gap:16px; margin-top:18px;">
+      {% if not can_view_permissions %}<p class="empty-state">You need the <code>permissions.view</code> grant to see what each role can be given.</p>{% endif %}
       {% for group, permissions in permission_catalog.items() %}
       {% set group_index = loop.index %}
       <div style="border:1px solid #edf2f7; border-radius:10px; padding:14px;">

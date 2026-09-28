@@ -12,11 +12,14 @@ page cannot observe:
 * one client's replay position does not affect the other.
 
 `publish_committed_audit_logs` runs synchronously after the commit on SQLite
-(the conftest suite database), so an ordinary request through the test client is
-enough to make the server emit; no sleeping or polling is needed.
+(the conftest suite database) and from a background task on every other dialect,
+so on SQL Server the packet arrives just after the request returns. The waits
+below cover both, and the negative cases drain for the full grace window so a
+late arrival still fails the test.
 """
 
 import json
+import time
 from uuid import uuid4
 
 import pytest
@@ -45,6 +48,32 @@ CREATED_AT = "2026-09-28T10:00:00"
 
 def audit_packets(client):
     return [packet for packet in client.get_received() if packet["name"] == "audit_log_event"]
+
+
+# The app publishes a committed audit row inline on SQLite but from a background
+# task on every other dialect, so on SQL Server the packet lands shortly after
+# the request returns rather than inside it. Waiting keeps these assertions about
+# *which* client received what valid on both backends.
+PUBLISH_GRACE_SECONDS = 5.0
+
+
+def wait_for_audit_packets(client, count=1, timeout=PUBLISH_GRACE_SECONDS):
+    deadline = time.monotonic() + timeout
+    while True:
+        packets = audit_packets(client)
+        if len(packets) >= count or time.monotonic() >= deadline:
+            return packets
+        time.sleep(0.05)
+
+
+def wait_for_no_audit_packets(client, timeout=PUBLISH_GRACE_SECONDS):
+    """Drain for the whole grace window, so a late arrival still fails the test."""
+    deadline = time.monotonic() + timeout
+    packets = []
+    while time.monotonic() < deadline:
+        packets.extend(audit_packets(client))
+        time.sleep(0.05)
+    return packets
 
 
 def drain(client):
@@ -176,8 +205,8 @@ def test_two_tabs_of_the_same_user_both_receive_the_event(live_clients):
     )
     assert response.status_code == 302
 
-    first_packets = audit_packets(first_tab)
-    second_packets = audit_packets(second_tab)
+    first_packets = wait_for_audit_packets(first_tab)
+    second_packets = wait_for_audit_packets(second_tab)
     assert len(first_packets) == 1
     assert len(second_packets) == 1
     # The same event, byte for byte, so both tabs can render the same row.
@@ -207,8 +236,8 @@ def test_a_second_user_receives_only_events_inside_their_scope(live_clients):
     assert response.status_code == 302
     assert "/tasks" in response.headers["Location"]
 
-    any_payloads = [packet["args"][0] for packet in audit_packets(any_tab)]
-    other_payloads = [packet["args"][0] for packet in audit_packets(other_tab)]
+    any_payloads = [packet["args"][0] for packet in wait_for_audit_packets(any_tab)]
+    other_payloads = [packet["args"][0] for packet in wait_for_no_audit_packets(other_tab)]
     # ANY covers the new row; the unrelated OWN-scoped user must not see it.
     assert any(payload["action"] == "status_changed" for payload in any_payloads)
     assert [payload for payload in other_payloads if payload["entityId"] == context["task_id"]] == []
@@ -231,6 +260,9 @@ def test_a_user_without_audit_permission_never_receives_events(live_clients):
     with app.app_context():
         assert AuditLog.query.filter_by(action="status_changed").count() == 1
     assert audit_packets(watcher) == []
+    # A late arrival from the background publish would still be a leak, so the
+    # negative case waits out the same grace window the positive ones use.
+    assert wait_for_no_audit_packets(watcher) == []
     # The fallback sync path is closed for the same user.
     assert watcher.emit("audit_sync", {"lastAuditLogId": 0}, callback=True) == {
         "ok": False,
@@ -253,7 +285,7 @@ def test_one_client_replaying_does_not_move_the_other_backward(live_clients):
         follow_redirects=False,
     )
     assert first.status_code == 302
-    first_payloads = [packet["args"][0] for packet in audit_packets(lagging_tab)]
+    first_payloads = [packet["args"][0] for packet in wait_for_audit_packets(lagging_tab)]
     assert len(first_payloads) == 1
     first_sequence = first_payloads[0]["sequence"]
 
@@ -276,7 +308,7 @@ def test_one_client_replaying_does_not_move_the_other_backward(live_clients):
     )
     assert second.status_code == 302
 
-    live_payloads = [packet["args"][0] for packet in audit_packets(lagging_tab)]
+    live_payloads = [packet["args"][0] for packet in wait_for_audit_packets(lagging_tab, count=2)]
     sequences = [payload["sequence"] for payload in live_payloads]
     assert sequences == sorted(sequences)
     assert sequences == sorted(set(sequences))

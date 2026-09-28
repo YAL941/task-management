@@ -11,7 +11,7 @@ from werkzeug.security import generate_password_hash
 from main import AuditLog, AuditLogScopeOwner, Permission, Role, RolePermission, User, UserRole, app, db
 
 
-def _make_user(label, permission_keys, scope):
+def _make_user(label, permission_keys, scope, created):
     user = User(
         first_name="Export",
         last_name=label,
@@ -33,6 +33,9 @@ def _make_user(label, permission_keys, scope):
         )
         db.session.add(role)
         db.session.flush()
+        # The teardown deletes exactly the role ids collected here, so a role
+        # made per grant cannot survive the module.
+        created["roles"].append(role.id)
         db.session.add(RolePermission(role_id=role.id, permission_id=grant.id, scope=scope))
         db.session.add(UserRole(user_id=user.id, role_id=role.id, assigned_by=user.id, created_at="2026-09-28T12:00:00"))
     return user
@@ -42,9 +45,9 @@ def _make_user(label, permission_keys, scope):
 def export_scenario():
     created = {"users": [], "roles": [], "logs": []}
     with app.app_context():
-        exporter = _make_user("Exporter", ("audit_logs.view", "audit_logs.export", "permissions.manage"), "ANY")
-        own_scope_exporter = _make_user("Scoped", ("audit_logs.view", "audit_logs.export", "permissions.manage"), "OWN")
-        no_export = _make_user("NoExport", ("audit_logs.view", "permissions.manage"), "ANY")
+        exporter = _make_user("Exporter", ("audit_logs.view", "audit_logs.export", "permissions.manage"), "ANY", created)
+        own_scope_exporter = _make_user("Scoped", ("audit_logs.view", "audit_logs.export", "permissions.manage"), "OWN", created)
+        no_export = _make_user("NoExport", ("audit_logs.view", "permissions.manage"), "ANY", created)
         created["users"].extend([exporter.id, own_scope_exporter.id, no_export.id])
 
         visible = AuditLog(
