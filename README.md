@@ -6,6 +6,8 @@ A Flask-based task management system with role-based access, notifications, team
 
 - User authentication and role-based access
 - Task creation, assignment, status updates, and dependency tracking
+- Automation rules that run inside the request and notify the assignee live
+- Performance reports by assignee, team, status, and priority, exportable as PDF, Excel, or CSV
 - Team and member management
 - Notifications and email simulation
 - Audit logs and automation rules
@@ -62,6 +64,62 @@ with as matching only an `ANY` grant, and fails closed when no grant exists.
 of the same name, so a legacy value of `User` still yields the `User` role's
 twelve own-level grants.
 
+## Automation rules
+
+A rule is a small trigger: an event, a condition, a value, and an action. Rules
+run **inside the request that satisfies them**, so the person responsible is
+notified as soon as the task changes, not on the next scheduled sweep.
+
+| Event | Condition | Value | Fires when |
+| --- | --- | --- | --- |
+| `status_changed` | `changes_to` | a task status | a task actually transitions into that status |
+| `status_changed` | `equals` | a task status | a task is in that status |
+| `overdue` | ignored | unused | a task's due date has passed and it is not `Completed` |
+
+Actions are `notify` and `email`; `email` sends the message and also records it
+in `email_logs`. The rule form rejects any other combination, so a rule that
+could never fire cannot be stored.
+
+The recipient is the **assignee** (`Task.user_id`), falling back to the creator
+when the task is unassigned. They receive a stored `Notification` and a live
+`NOTIFICATION_CREATED` push to their `user:<id>` room, so the bell updates
+without a page reload.
+
+Each rule fires at most once per task and state. The published event's own
+`event_id` is the marker, for example `automation-7-42-Completed`, so a repeat
+status change, a reconnect replay, and the worker's periodic sweep are all
+idempotent. An `overdue` rule's marker carries the date, giving one notification
+per day while a task stays late.
+
+Every firing writes an `automation_triggered` audit row on the task, with the
+rule, action, condition, resulting status, and recipient, scoped to the
+creator, the assignee, and the recipient, so it appears in each of their audit
+views.
+
+`run_automation_once` remains the sweep for the optional `worker.py`: it covers
+the time-based `overdue` event and acts as a safety net for a rule created while
+a task is already in the target state. Deduplication makes a repeated sweep a
+no-op.
+
+## Performance reports
+
+`/reports` aggregates the caller's visible tasks - the same set
+`visible_tasks_for_user` returns, so a report can never show a task the caller
+could not open - into a completion rate, an open and overdue count, per-status
+and per-priority counts, and a per-assignee table with assigned, completed,
+overdue, and completion rate. `?date_from=` and `?date_to=` narrow the period;
+completed tasks are dated by `completed_at` and everything else by its due date.
+A task with neither date is kept, because nothing proves it falls outside the
+window and excluding it would quietly understate the totals.
+
+`/analytics` shows the same distribution live. Both pages export the aggregate
+as `GET /export/reports.<fmt>` in `csv`, `xlsx`, and `pdf`: the workbook has a
+`Summary`, `By assignee`, and `By team` sheet, and the PDF is a paginated report
+rather than a raw row dump. The endpoint requires `permissions.manage` from
+`admin_required` and additionally `reports.view`; a missing grant records
+`reports_view_forbidden` and returns `403`. `resource=tasks` still exports the
+raw task rows, which is what the importer consumes.
+
 ## HTTP API
 
 Every route is guarded by `login_required`; `/automation`, `/data`, and
@@ -100,13 +158,13 @@ in the form body or the `X-CSRF-Token` header; the JSON routes answer `400` with
 | GET | `/api/realtime/token` | session | `{"token", "user_id"}` for the Socket.IO handshake |
 | POST | `/api/ai/ask` | session | `{"prompt"}`, required, at most 2000 characters; `{"ok", "answer", "mode"}` where `mode` is `mock` or `live` |
 | GET, POST | `/assistant` | session | The HTML view of the assistant |
-| GET, POST | `/automation` | `permissions.manage` | `name` and `value` are required |
+| GET, POST | `/automation` | `permissions.manage` | `name` is required; `event`, `condition`, and `action` must be a supported combination, and a status rule's `value` must be a real status |
 | POST | `/automation/<id>/toggle` | `permissions.manage` | Flips `enabled` and records `toggled` |
 | GET, POST | `/data` | `permissions.manage` | Import; writes `imported` |
-| GET | `/export/<resource>.<fmt>` | `permissions.manage`, plus the resource's own key (`audit_logs` needs `audit_logs.view` and `audit_logs.export`) | `csv`, `xlsx`, `pdf`; an audit export is itself recorded |
+| GET | `/export/<resource>.<fmt>` | `permissions.manage`, plus the resource's own key (`audit_logs` needs `audit_logs.view` and `audit_logs.export`; `reports` needs `reports.view`) | `csv`, `xlsx`, `pdf`; an audit export is itself recorded |
 | GET, POST | `/settings` | `settings.view` to read, `settings.edit` to write | |
 | POST | `/settings/test-email` | `settings.edit` | Mock mode unless SMTP is configured |
-| GET | `/reports`, `/analytics` | `reports.view` | Analytics is not a separate key; it reuses `reports.view` |
+| GET | `/reports`, `/analytics` | `reports.view` | Analytics is not a separate key; it reuses `reports.view`. `/reports` accepts `?date_from` and `?date_to` and shows the aggregate plus its export links |
 | GET | `/audit-logs` | `audit_logs.view` | Scoped; see "Filtering" |
 | GET | `/audit-logs/<id>` | `audit_logs.view` and in-scope | `404` when out of scope, so ids cannot be probed |
 | GET | `/notifications/feed` | session | `{"unread_count", "notifications": [{"id", "message", "created_at", "url", "is_read"}]}` for the caller only |
@@ -149,7 +207,7 @@ The audit log uses the existing `audit_logs` columns. Current event catalog:
 | Attachments | `ATTACHMENT_UPLOADED`, `ATTACHMENT_DOWNLOADED`, `ATTACHMENT_DELETED`, `ATTACHMENT_UPLOAD_FAILED` | `attachment`, `task` | Success, failed, or denied outcome |
 | Comments | `COMMENT_CREATED` | `task` | Successful persisted change; comment body is not copied into audit metadata |
 | Notifications | `NOTIFICATION_CREATED`, `NOTIFICATION_OPENED`, `NOTIFICATIONS_MARKED_READ` | `notification` | Successful persisted change; message content is not copied |
-| Other tracked changes | `created`, `updated`, `deleted`, `imported`, `toggled` | entity name | Successful persisted change |
+| Other tracked changes | `created`, `updated`, `deleted`, `imported`, `toggled`, `automation_triggered` | entity name | Successful persisted change |
 
 `AuditEventService` is the central writer; the existing `write_audit` helper
 delegates to it for compatibility. New outcomes are stored under
@@ -330,6 +388,7 @@ run touches `.env` or a real database. Run everything with:
 | `test_audit_logs_export.py` | CSV, xlsx, and pdf export, scope, and the export audit row |
 | `test_tasks_regression.py` | Task create/edit/delete/status/dependency validation, permission failures, list filters, and the side tables each write touches |
 | `test_workspace_regression.py` | Team membership and creation, automation, roles, users, notifications, the assistant API, the admin-only screens, and that every template compiles |
+| `test_automation_reports.py` | Rule firing inside the status request, the assignee as recipient, the live push and its dedupe marker, a silent repeated sweep, `changes_to` versus `equals`, `overdue`, unsupported rule combinations, and the report aggregate, period, scoping, and three export formats |
 | `test_mssql_audit_integration.py` | The always-on T-SQL dialect layer, plus the opt-in end-to-end run against a real server |
 
 `test_workspace_regression.py` includes a test that compiles every template.

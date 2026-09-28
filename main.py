@@ -840,11 +840,15 @@ def realtime_token(user_id):
     )
 
 
-def realtime_event(event_type, actor_id, entity_type, entity_id=None, payload=None, rooms=None):
-    """Persist an event before publishing it so reconnect sync has a durable source."""
+def realtime_event(event_type, actor_id, entity_type, entity_id=None, payload=None, rooms=None, event_id=None):
+    """Persist an event before publishing it so reconnect sync has a durable source.
+
+    `event_id` is generated when not given. Passing a stable one lets a caller
+    (the automation engine) both deduplicate and publish from a single row.
+    """
     created_at = datetime.now().isoformat(timespec="seconds")
     event = RealtimeEvent(
-        event_id=uuid.uuid4().hex,
+        event_id=event_id or uuid.uuid4().hex,
         event_type=event_type,
         actor_id=actor_id,
         entity_type=entity_type,
@@ -872,8 +876,8 @@ def publish_realtime(message, rooms):
         socketio.emit("realtime_event", message, to=room)
 
 
-def record_realtime_event(event_type, actor_id, entity_type, entity_id=None, payload=None, rooms=None):
-    message, target_rooms = realtime_event(event_type, actor_id, entity_type, entity_id, payload, rooms)
+def record_realtime_event(event_type, actor_id, entity_type, entity_id=None, payload=None, rooms=None, event_id=None):
+    message, target_rooms = realtime_event(event_type, actor_id, entity_type, entity_id, payload, rooms, event_id)
     db.session.commit()
     publish_realtime(message, target_rooms)
 
@@ -1618,20 +1622,119 @@ def dependency_would_cycle(predecessor_id, successor_id):
     return False
 
 
-def run_automation_once():
-    """Evaluate enabled rules once; callable from a scheduler or worker process."""
-    fired = 0
+AUTOMATION_EVENTS = {"status_changed", "overdue"}
+AUTOMATION_CONDITIONS = {"equals", "changes_to"}
+AUTOMATION_ACTIONS = {"notify", "email"}
+
+
+def automation_recipient(task):
+    """The person responsible for a task: its assignee, else its creator."""
+    if task.user_id:
+        return db.session.get(User, task.user_id)
+    if task.creator_id:
+        return db.session.get(User, task.creator_id)
+    return None
+
+
+def automation_matches(rule, task, previous_status=None):
+    """Whether a rule fires for a task right now.
+
+    `changes_to` only matches an actual transition, which is what the status
+    route supplies; the worker's `equals` scan passes no previous status.
+    """
+    if not rule.enabled:
+        return False
+    if rule.event == "status_changed":
+        if rule.condition not in AUTOMATION_CONDITIONS:
+            return False
+        if (task.status or "") != (rule.value or ""):
+            return False
+        if rule.condition == "changes_to":
+            return previous_status is not None and previous_status != task.status
+        return True
+    if rule.event == "overdue":
+        if not task.due_date or task.status == "Completed":
+            return False
+        return task.due_date[:10] < date.today().isoformat()
+    return False
+
+
+def automation_marker(rule, task):
+    """A stable event id per rule, task, and state, used to fire only once."""
+    state = "overdue" if rule.event == "overdue" else (task.status or "none").replace(" ", "-")
+    if rule.event == "overdue":
+        state = f"overdue-{date.today().isoformat()}"
+    return f"automation-{rule.id}-{task.id}-{state}"[:64]
+
+
+def fire_automation_rules(task, previous_status=None, actor_id=None):
+    """Apply every enabled rule to one task and notify the responsible person.
+
+    Returns the ids of the rules that fired. Each rule fires at most once per
+    task and state: the marker is the published event's own id, so a repeat
+    status change, a reconnect replay, or the worker's periodic scan cannot
+    produce a second notification.
+    """
+    fired = []
+    if not task:
+        return fired
     for rule in AutomationRule.query.filter_by(enabled=True).all():
-        tasks = Task.query.filter(Task.status == rule.value).all() if rule.event == "status_changed" and rule.condition in {"equals", "changes_to"} else Task.query.filter(Task.due_date < date.today().isoformat(), Task.status != "Completed").all() if rule.event == "overdue" else []
-        for task in tasks:
-            recipient = db.session.get(User, task.creator_id or task.user_id)
-            if not recipient:
-                continue
-            message = f"Automation '{rule.name}' matched task: {task.title}"
-            create_notification(recipient.id, message, datetime.now().isoformat(timespec="seconds"))
-            if rule.action == "email":
-                send_email_notification(recipient.email, rule.name, message, recipient.id)
-            fired += 1
+        if not automation_matches(rule, task, previous_status):
+            continue
+        marker = automation_marker(rule, task)
+        if RealtimeEvent.query.filter_by(event_id=marker).first():
+            continue
+        recipient = automation_recipient(task)
+        if not recipient:
+            continue
+        message = f"Automation '{rule.name}' matched task: {task.title}"
+        notification = create_notification(
+            recipient.id,
+            message,
+            datetime.now().isoformat(timespec="seconds"),
+            scope_team_id=task.team_id,
+        )
+        if rule.action == "email":
+            send_email_notification(recipient.email, rule.name, message, recipient.id)
+        # The recipient gets the notification pushed over the live connection,
+        # not just stored for the next page load.
+        record_realtime_event(
+            "NOTIFICATION_CREATED",
+            actor_id,
+            "notification",
+            notification.id,
+            {"message": message, "automationRuleId": rule.id, "taskId": task.id, "recipientIds": [recipient.id]},
+            {f"user:{recipient.id}"},
+            event_id=marker,
+        )
+        write_audit(
+            "automation_triggered", "task", task.id,
+            new_value={
+                "rule_id": rule.id,
+                "rule": rule.name,
+                "action": rule.action,
+                "condition": rule.condition,
+                "status": task.status,
+                "recipient": recipient.username,
+            },
+            scope_owner_ids={task.creator_id, task.user_id, recipient.id},
+            scope_team_id=task.team_id,
+        )
+        fired.append(rule.id)
+    return fired
+
+
+def run_automation_once():
+    """Sweep the tasks a periodic worker should look at.
+
+    The web app already fires rules inside the status change request; this sweep
+    exists for the time-based `overdue` event and as a safety net for a rule
+    created while a task is already in the target state. Deduplication makes a
+    repeated sweep a no-op.
+    """
+    fired = 0
+    for task in Task.query.all():
+        fired += len(fire_automation_rules(task))
     db.session.commit()
     return fired
 
@@ -3036,6 +3139,11 @@ def update_status(id, new_status):
             scope_team_id=task.team_id,
         )
     db.session.commit()
+    if status_changed:
+        # Automation rules run inside the request, so the responsible person is
+        # notified immediately instead of waiting for a scheduled sweep.
+        fire_automation_rules(task, previous_status=old_status, actor_id=session["user_id"])
+        db.session.commit()
     creator = db.session.get(User, task.creator_id) if task.creator_id else None
     if status_changed and creator and creator.id != session["user_id"]:
         send_email_notification(creator.email, f"Task status changed: {task.title}", f"Task '{task.title}' is now {new_status}.", creator.id, "status_changed")
@@ -3104,16 +3212,257 @@ def delete_dependency(task_id, dependency_id):
     return redirect(url_for("task_dependencies", id=task_id))
 
 
-@app.route("/reports")
+def report_period(args):
+    """Read the optional `date_from`/`date_to` window for a report."""
+    def clean(value):
+        value = (value or "").strip()
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value[:10], "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
+
+    date_from = clean(args.get("date_from"))
+    date_to = clean(args.get("date_to"))
+    if date_from and date_to and date_from > date_to:
+        date_from, date_to = date_to, date_from
+    return date_from, date_to
+
+
+def task_report(user_id, date_from=None, date_to=None):
+    """Aggregate the caller's visible tasks into a performance report.
+
+    The figures come from `visible_tasks_for_user`, so a report can never show a
+    task the caller could not open on the task list. Completed tasks are dated by
+    `completed_at`; everything else is dated by its due date, falling back to the
+    task id order, which keeps an undated task inside a period that has no
+    explicit boundaries.
+    """
+    tasks = visible_tasks_for_user(user_id)
+    today = date.today().isoformat()
+
+    def in_period(task):
+        if not date_from and not date_to:
+            return True
+        stamp = (task.completed_at or task.due_date or "")[:10]
+        if not stamp:
+            # Nothing to compare against, so the task cannot be proven outside
+            # the window. Excluding it would quietly understate the totals.
+            return True
+        if date_from and stamp < date_from:
+            return False
+        if date_to and stamp > date_to:
+            return False
+        return True
+
+    selected = [task for task in tasks if in_period(task)]
+    by_status = {status: 0 for status in sorted(VALID_STATUSES)}
+    by_priority = {priority: 0 for priority in sorted(VALID_PRIORITIES)}
+    completed = overdue = 0
+    assignees = {}
+    teams = {}
+    for task in selected:
+        by_status[task.status] = by_status.get(task.status, 0) + 1
+        by_priority[task.priority] = by_priority.get(task.priority, 0) + 1
+        is_completed = task.status == "Completed"
+        completed += is_completed
+        is_overdue = bool(task.due_date and not is_completed and task.due_date[:10] < today)
+        overdue += is_overdue
+        if task.user_id:
+            assignee = assignees.setdefault(
+                task.user_id, {"user_id": task.user_id, "assigned": 0, "completed": 0, "overdue": 0}
+            )
+            assignee["assigned"] += 1
+            assignee["completed"] += is_completed
+            assignee["overdue"] += is_overdue
+        if task.team_id:
+            team = teams.setdefault(task.team_id, {"team_id": task.team_id, "tasks": 0, "completed": 0})
+            team["tasks"] += 1
+            team["completed"] += is_completed
+
+    assignee_rows = []
+    for entry in assignees.values():
+        user = db.session.get(User, entry["user_id"])
+        assigned = entry["assigned"]
+        assignee_rows.append({
+            "assignee": user.username if user else f"user #{entry['user_id']}",
+            "assigned": assigned,
+            "completed": entry["completed"],
+            "overdue": entry["overdue"],
+            "completion_rate": f"{(entry['completed'] * 100 // assigned) if assigned else 0}%",
+        })
+    assignee_rows.sort(key=lambda row: (-row["assigned"], row["assignee"]))
+
+    team_rows = []
+    for entry in teams.values():
+        team = db.session.get(Team, entry["team_id"])
+        team_rows.append({
+            "team": team.name if team else f"team #{entry['team_id']}",
+            "tasks": entry["tasks"],
+            "completed": entry["completed"],
+            "completion_rate": f"{(entry['completed'] * 100 // entry['tasks']) if entry['tasks'] else 0}%",
+        })
+    team_rows.sort(key=lambda row: (-row["tasks"], row["team"]))
+
+    total = len(selected)
+    summary = [
+        ("Tasks in period", str(total)),
+        ("Completed", str(completed)),
+        ("Open", str(total - completed)),
+        ("Overdue", str(overdue)),
+        ("Completion rate", f"{(completed * 100 // total) if total else 0}%"),
+        ("Generated at", datetime.now().isoformat(timespec="seconds")),
+        ("Period", f"{date_from or 'all time'} to {date_to or 'today'}"),
+    ]
+    return {
+        "summary": summary,
+        "by_status": [{"status": key, "tasks": value} for key, value in by_status.items()],
+        "by_priority": [{"priority": key, "tasks": value} for key, value in by_priority.items()],
+        "assignees": assignee_rows,
+        "teams": team_rows,
+    }
+
+
+def report_title(user_id, date_from=None, date_to=None):
+    window = f"{date_from or 'all time'} to {date_to or 'today'}"
+    user = db.session.get(User, user_id)
+    return f"TaskHQ performance report - {user.username if user else 'user'} - {window}"
+
+
+def render_report_csv(report):
+    stream = io.StringIO()
+    writer = csv.writer(stream)
+    writer.writerow(["Section", "Name", "Assigned", "Completed", "Overdue", "Completion rate"])
+    for label, value in report["summary"]:
+        writer.writerow(["Summary", label, "", "", "", value])
+    for row in report["by_status"] + report["by_priority"]:
+        writer.writerow([row["status"] if "status" in row else row["priority"], "", "", "", "", ""])
+    for row in report["assignees"]:
+        writer.writerow(["Assignee", row["assignee"], row["assigned"], row["completed"], row["overdue"], row["completion_rate"]])
+    for row in report["teams"]:
+        writer.writerow(["Team", row["team"], row["tasks"], row["completed"], "", row["completion_rate"]])
+    return stream.getvalue().encode("utf-8-sig")
+
+
+def render_report_xlsx(report, title):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    workbook = Workbook()
+    header_font = Font(bold=True)
+    summary_sheet = workbook.active
+    summary_sheet.title = "Summary"
+    summary_sheet.append([title])
+    summary_sheet["A1"].font = Font(bold=True, size=13)
+    summary_sheet.append([])
+    for label, value in report["summary"]:
+        summary_sheet.append([label, value])
+    summary_sheet.append([])
+    for heading, rows, columns in (
+        ("By status", report["by_status"], ("Status", "Tasks")),
+        ("By priority", report["by_priority"], ("Priority", "Tasks")),
+    ):
+        summary_sheet.append([heading])
+        summary_sheet.cell(row=summary_sheet.max_row, column=1).font = header_font
+        summary_sheet.append(list(columns))
+        summary_sheet.cell(row=summary_sheet.max_row, column=1).font = header_font
+        for row in rows:
+            summary_sheet.append([row["status"] if "status" in row else row["priority"], row["tasks"]])
+        summary_sheet.append([])
+
+    assignee_sheet = workbook.create_sheet("By assignee")
+    assignee_sheet.append(["Assignee", "Assigned", "Completed", "Overdue", "Completion rate"])
+    for cell in assignee_sheet[1]:
+        cell.font = header_font
+    for row in report["assignees"]:
+        assignee_sheet.append([row["assignee"], row["assigned"], row["completed"], row["overdue"], row["completion_rate"]])
+
+    team_sheet = workbook.create_sheet("By team")
+    team_sheet.append(["Team", "Tasks", "Completed", "Completion rate"])
+    for cell in team_sheet[1]:
+        cell.font = header_font
+    for row in report["teams"]:
+        team_sheet.append([row["team"], row["tasks"], row["completed"], row["completion_rate"]])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def render_report_pdf(report, title):
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output, pagesize=letter)
+    width, height = letter
+    margin = 40
+    y = height - margin
+
+    def ensure(needed=18):
+        nonlocal y
+        if y - needed < margin:
+            pdf.showPage()
+            y = height - margin
+
+    def line(text, size=9, indent=0, bold=False):
+        nonlocal y
+        ensure(size + 6)
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        pdf.drawString(margin + indent, y, str(text)[:int((width - 2 * margin) / (size * 0.5))])
+        y -= size + 6
+
+    line(title, 13, bold=True)
+    y -= 6
+    line("Summary", 11, bold=True)
+    for label, value in report["summary"]:
+        line(f"{label}: {value}", 9, indent=8)
+    y -= 4
+    line("By status", 11, bold=True)
+    for row in report["by_status"]:
+        line(f"{row['status']}: {row['tasks']}", 9, indent=8)
+    line("By priority", 11, bold=True)
+    for row in report["by_priority"]:
+        line(f"{row['priority']}: {row['tasks']}", 9, indent=8)
+    y -= 4
+    line("By assignee", 11, bold=True)
+    line("Assignee | Assigned | Completed | Overdue | Rate", 8, bold=True)
+    for row in report["assignees"]:
+        line(f"{row['assignee']} | {row['assigned']} | {row['completed']} | {row['overdue']} | {row['completion_rate']}", 9, indent=8)
+    if report["teams"]:
+        y -= 4
+        line("By team", 11, bold=True)
+        line("Team | Tasks | Completed | Rate", 8, bold=True)
+        for row in report["teams"]:
+            line(f"{row['team']} | {row['tasks']} | {row['completed']} | {row['completion_rate']}", 9, indent=8)
+    pdf.save()
+    output.seek(0)
+    return output
+
+
+@app.route("/reports", methods=["GET"])
 @login_required
 def reports():
     if not has_permission(session["user_id"], "reports.view"):
         record_access_denial("reports_view_forbidden", "reports")
         flash("You do not have permission to view reports.", "danger")
         return redirect(url_for("tasks"))
+    date_from, date_to = report_period(request.args)
+    report = task_report(session["user_id"], date_from, date_to)
     reports_data = task_rows_for_current_user()
     notifications, unread_count = get_shared_data()
-    return render_template("reports.html", reports=reports_data, users_count=User.query.count(), notifications=notifications, unread_count=unread_count)
+    return render_template(
+        "reports.html",
+        reports=reports_data,
+        report=report,
+        date_from=date_from or "",
+        date_to=date_to or "",
+        users_count=User.query.count(),
+        notifications=notifications,
+        unread_count=unread_count,
+    )
 
 
 @app.route("/analytics")
@@ -3471,14 +3820,30 @@ def automation():
         if not valid_csrf():
             flash("Invalid request. Please try again.", "danger")
         else:
-            rule = AutomationRule(name=request.form.get("name", "").strip(), event=request.form.get("event", "status_changed"), condition=request.form.get("condition", "equals"), value=request.form.get("value", "").strip(), action=request.form.get("action", "notify"), created_by=session["user_id"], created_at=datetime.now().isoformat(timespec="seconds"))
-            if not rule.name or not rule.value:
-                flash("Rule name and value are required.", "danger")
+            event = request.form.get("event", "status_changed")
+            condition = request.form.get("condition", "equals")
+            action = request.form.get("action", "notify")
+            value = request.form.get("value", "").strip()
+            name = request.form.get("name", "").strip()
+            # Only the combinations the engine actually runs are accepted, so a
+            # rule that could never fire cannot be stored.
+            if not name:
+                flash("Rule name is required.", "danger")
+            elif event not in AUTOMATION_EVENTS or condition not in AUTOMATION_CONDITIONS or action not in AUTOMATION_ACTIONS:
+                flash("Choose a supported event, condition, and action.", "danger")
+            elif event == "status_changed" and value not in VALID_STATUSES:
+                flash("Choose a valid task status to match.", "danger")
             else:
+                rule = AutomationRule(
+                    name=name, event=event, condition=condition, value=value or None,
+                    action=action, created_by=session["user_id"],
+                    created_at=datetime.now().isoformat(timespec="seconds"),
+                )
                 db.session.add(rule)
+                db.session.flush()
                 write_audit(
-                    "created", "automation_rule", None,
-                    new_value={"name": rule.name, "event": rule.event},
+                    "created", "automation_rule", rule.id,
+                    new_value={"name": rule.name, "event": rule.event, "condition": rule.condition, "value": rule.value, "action": rule.action},
                     scope_owner_ids={rule.created_by},
                 )
                 db.session.commit()
@@ -3486,7 +3851,13 @@ def automation():
         return redirect(url_for("automation"))
     rules = AutomationRule.query.order_by(AutomationRule.id.desc()).all()
     notifications, unread_count = get_shared_data()
-    return render_template("automation.html", rules=rules, notifications=notifications, unread_count=unread_count)
+    return render_template(
+        "automation.html",
+        rules=rules,
+        notifications=notifications,
+        unread_count=unread_count,
+        valid_statuses=sorted(VALID_STATUSES),
+    )
 
 
 @app.route("/automation/<int:id>/toggle", methods=["POST"])
@@ -3596,7 +3967,39 @@ def audit_export_rows(user_id):
 def export_data(resource, file_format):
     if resource not in {"tasks", "users", "teams", "reports", "audit_logs"} or file_format not in {"csv", "xlsx", "pdf"}:
         return {"ok": False, "error": "Unsupported export"}, 400
-    if resource in {"tasks", "reports"}:
+    if resource == "reports":
+        # A report is an aggregate, not a task dump, and it is scoped to the
+        # caller exactly like the report screen.
+        if not has_permission(session["user_id"], "reports.view"):
+            record_access_denial("reports_view_forbidden", "reports")
+            return {"ok": False, "error": "You are not authorized to export reports."}, 403
+        date_from, date_to = report_period(request.args)
+        report = task_report(session["user_id"], date_from, date_to)
+        title = report_title(session["user_id"], date_from, date_to)
+        if file_format == "csv":
+            return send_file(
+                io.BytesIO(render_report_csv(report)),
+                mimetype="text/csv",
+                as_attachment=True,
+                download_name="reports.csv",
+            )
+        if file_format == "xlsx":
+            try:
+                output = render_report_xlsx(report, title)
+            except ImportError:
+                return {"ok": False, "error": "Install openpyxl for Excel export"}, 501
+            return send_file(
+                output,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                as_attachment=True,
+                download_name="reports.xlsx",
+            )
+        try:
+            output = render_report_pdf(report, title)
+        except ImportError:
+            return {"ok": False, "error": "Install reportlab for PDF export"}, 501
+        return send_file(output, mimetype="application/pdf", as_attachment=True, download_name="reports.pdf")
+    if resource in {"tasks"}:
         rows = [{"id": task.id, "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "user_id": task.user_id, "team_id": task.team_id} for task in Task.query.order_by(Task.id).all()]
     elif resource == "users":
         rows = [{"id": user.id, "username": user.username, "role": user.role, "email": user.email} for user in User.query.order_by(User.id).all()]

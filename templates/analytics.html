@@ -15,7 +15,7 @@
   }
 </style>{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Performance centre</p><h1>Analytics</h1><p class="page-subtitle">Understand workload and delivery using the tasks you are allowed to see.</p></div></div>
+<div class="page-head"><div><p class="eyebrow">Performance centre</p><h1>Analytics</h1><p class="page-subtitle">Understand workload and delivery using the tasks you are allowed to see.</p></div><div class="quick-actions"><a href="{{ url_for('export_data', resource='reports', file_format='pdf') }}" class="secondary-action">Report PDF</a><a href="{{ url_for('export_data', resource='reports', file_format='xlsx') }}" class="secondary-action">Report Excel</a><a href="{{ url_for('export_data', resource='reports', file_format='csv') }}" class="secondary-action">Report CSV</a></div></div>
 <div class="metric-grid"><div class="metric-card metric-blue"><div><span class="metric-label">Total tasks</span><strong>{{ total }}</strong><small>Visible workload</small></div><span class="metric-icon">⌁</span></div><div class="metric-card metric-green"><div><span class="metric-label">Completed</span><strong>{{ status_counts.get('Completed', 0) }}</strong><small>Delivered tasks</small></div><span class="metric-icon">✓</span></div><div class="metric-card metric-slate"><div><span class="metric-label">Overdue</span><strong>{{ overdue }}</strong><small>Needs attention</small></div><span class="metric-icon">!</span></div></div>
 <div class="metric-grid" style="margin-top:14px;">
   <div class="metric-card metric-blue"><div><span class="metric-label">Teams</span><strong>{{ total_teams }}</strong><small>Active groups</small></div><span class="metric-icon">◎</span></div>

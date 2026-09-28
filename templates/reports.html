@@ -3,7 +3,42 @@
 {% block title %}Reports - TaskHQ{% endblock %}
 
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Performance centre</p><h1>Reports</h1><p class="page-subtitle">A focused view of task health, ownership, and delivery.</p></div><a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>→</span></a></div>
+<div class="page-head"><div><p class="eyebrow">Performance centre</p><h1>Reports</h1><p class="page-subtitle">A focused view of task health, ownership, and delivery.</p></div><div class="quick-actions"><a href="{{ url_for('export_data', resource='reports', file_format='pdf', date_from=date_from, date_to=date_to) }}" class="secondary-action">Report PDF</a><a href="{{ url_for('export_data', resource='reports', file_format='xlsx', date_from=date_from, date_to=date_to) }}" class="secondary-action">Report Excel</a><a href="{{ url_for('export_data', resource='reports', file_format='csv', date_from=date_from, date_to=date_to) }}" class="secondary-action">Report CSV</a><a href="{{ url_for('tasks') }}" class="secondary-action">Back to tasks <span>→</span></a></div></div>
+
+<form method="GET" class="form-grid report-period">
+    <label class="form-label">From<input class="field" type="date" name="date_from" value="{{ date_from }}"></label>
+    <label class="form-label">To<input class="field" type="date" name="date_to" value="{{ date_to }}"></label>
+    <div class="form-actions"><button class="secondary-action" type="submit">Apply period</button></div>
+</form>
+
+<div class="card-surface">
+    <div class="form-section-title"><span class="form-number">Σ</span><div><strong>Performance summary</strong><small>Completion rate and overdue count for the period, limited to the tasks you can see.</small></div></div>
+    <div class="form-grid">
+        {% for label, value in report.summary %}{% if not label.startswith('Generated') and not label.startswith('Period') %}
+        <label class="form-label">{{ label }}<input class="field" value="{{ value }}" readonly></label>
+        {% endif %}{% endfor %}
+    </div>
+</div>
+
+<div class="card-surface">
+    <div class="form-section-title"><span class="form-number">01</span><div><strong>By assignee</strong><small>Who carries the workload and who delivers it.</small></div></div>
+    {% if report.assignees %}
+    <table class="data-table">
+        <thead><tr><th>Assignee</th><th>Assigned</th><th>Completed</th><th>Overdue</th><th>Completion rate</th></tr></thead>
+        <tbody>{% for row in report.assignees %}<tr><td>{{ row.assignee }}</td><td>{{ row.assigned }}</td><td>{{ row.completed }}</td><td>{{ row.overdue }}</td><td>{{ row.completion_rate }}</td></tr>{% endfor %}</tbody>
+    </table>
+    {% else %}<p class="empty-state">No assignee has a task in this period.</p>{% endif %}
+</div>
+
+{% if report.teams %}
+<div class="card-surface">
+    <div class="form-section-title"><span class="form-number">02</span><div><strong>By team</strong><small>Delivery per team.</small></div></div>
+    <table class="data-table">
+        <thead><tr><th>Team</th><th>Tasks</th><th>Completed</th><th>Completion rate</th></tr></thead>
+        <tbody>{% for row in report.teams %}<tr><td>{{ row.team }}</td><td>{{ row.tasks }}</td><td>{{ row.completed }}</td><td>{{ row.completion_rate }}</td></tr>{% endfor %}</tbody>
+    </table>
+</div>
+{% endif %}
 
 {% set completed = reports|selectattr('status', 'equalto', 'Completed')|list|length %}
 {% set high_priority = reports|selectattr('priority', 'equalto', 'High')|list|length %}
